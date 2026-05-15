@@ -1,0 +1,17 @@
+package infra.systemdesign.paymentledger.application.port;
+
+import infra.systemdesign.paymentledger.domain.LedgerEntry;
+import infra.systemdesign.paymentledger.domain.PaymentRequest;
+import java.math.BigDecimal;
+import java.util.List;
+
+public interface LedgerStore {
+
+    String recordPayment(PaymentRequest request);
+
+    List<LedgerEntry> entriesForTransaction(String transactionId);
+
+    BigDecimal balanceForTransaction(String transactionId);
+
+    int entryCount();
+}

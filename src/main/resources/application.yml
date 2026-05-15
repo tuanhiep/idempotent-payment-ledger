@@ -1,0 +1,9 @@
+spring:
+  application:
+    name: idempotent-payment-ledger
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: "health,info,metrics"
