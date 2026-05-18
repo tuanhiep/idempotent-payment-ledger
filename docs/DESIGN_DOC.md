@@ -136,8 +136,9 @@ First slice:
 
 Production target:
 
-- `idempotency_records(key, payload_hash, request_body, response_body, status, created_at)`;
+- `idempotency_records(tenant_id, key, payload_hash, request_body, response_body, status, created_at, completed_at, expires_at)`;
 - `payments(payment_id, idempotency_key, amount, currency, status, created_at)`;
+- `ledger_transactions(transaction_id, payment_id, posting_rule, posting_rule_version, status, created_at)`;
 - `ledger_entries(entry_id, transaction_id, account_id, type, amount, currency, created_at)`;
 - `outbox_events(event_id, aggregate_id, event_type, payload, created_at, published_at)`.
 
@@ -146,6 +147,57 @@ Production target:
 The ledger mutation and idempotency record must be atomic in production. The first slice uses an `IdempotencyStore` abstraction backed by an in-memory reservation map: the winning request reserves the key, records the ledger mutation, then completes the stored outcome; duplicate same-payload requests wait for or replay that outcome.
 
 The production design should rely on a database transaction and a uniqueness constraint on the idempotency key. Distributed locks are not the first choice for the ledger boundary because the database is already the authority for the write.
+
+## Durable Transaction Boundary
+
+The next slice should make the write boundary explicit before adding more product features.
+
+The production transaction should commit these facts together:
+
+```text
+idempotency_records: the request key, payload hash, request body, response body, and status
+payments: the accepted payment intent/outcome
+ledger_transactions: the accounting event for the payment
+ledger_entries: the balanced debit and credit postings
+outbox_events: optional domain event for async publication
+```
+
+Atomicity rule:
+
+```text
+If the ledger mutation commits, the idempotency outcome must also commit.
+If the idempotency outcome commits, the ledger mutation must also commit.
+```
+
+This prevents the dangerous middle state where a retry cannot tell whether the original request created ledger side effects.
+
+Recommended production uniqueness boundary:
+
+```text
+UNIQUE (tenant_id, idempotency_key)
+```
+
+The first implementation may use a narrower single-tenant key, but the design should remain tenant-scoped because idempotency keys are caller-generated and must not collide globally across tenants.
+
+## Posting Rule Boundary
+
+The current first slice creates a debit and credit pair directly inside the in-memory ledger adapter. That is acceptable for proving the first invariant, but production code should introduce an explicit posting rule boundary:
+
+```text
+PaymentIntakeService
+  -> PostingRule / LedgerPostingService
+  -> LedgerStore
+```
+
+For the initial payment event:
+
+```text
+PAYMENT_ACCEPTED:
+  debit  payer account
+  credit merchant account
+```
+
+The ledger boundary should validate that every generated `ledger_transaction` balances before persistence. Future rule changes should be versioned, audited, and tied to the generated ledger transaction.
 
 ## Alternatives Considered
 
@@ -161,11 +213,25 @@ Insufficient. The system must also bind the key to a payload hash to reject acci
 
 Deferred. A durable uniqueness constraint is simpler and more authoritative for the payment write boundary.
 
+### Single Postgres transaction
+
+Preferred for the next slice. Payment state, idempotency outcome, ledger transaction, ledger entries, and outbox row can be committed under one source of truth.
+
+### Redis lock plus database write
+
+Not the default. A Redis lock can reduce duplicate pressure before the database, but it does not replace the database uniqueness constraint. If Redis succeeds and the database fails, the database remains the authority.
+
+### Event-sourced ledger as the first persistence slice
+
+Deferred. Event sourcing is powerful for audit and replay, but it adds modeling and operational complexity before the basic transaction boundary is proven.
+
 ## Trade-Off Analysis
 
 The first slice chooses in-memory storage for fast learning and testability. This is not production-ready, but it lets the module prove the core semantics before adding persistence.
 
 The next slice should replace in-memory maps with durable tables and transaction boundaries.
+
+The key trade-off is speed of learning versus production realism. Starting in memory made the invariants easy to inspect. The next milestone must now shift pressure to durable state so failure tests can prove behavior across the same boundary that production would rely on.
 
 ## Open Questions
 

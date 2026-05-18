@@ -18,7 +18,9 @@ public record PaymentRequest(
         if (merchantAccountId == null || merchantAccountId.isBlank()) {
             throw new IllegalArgumentException("merchantAccountId must not be blank");
         }
-        if (payerAccountId.equals(merchantAccountId)) {
+        String canonicalPayerAccountId = payerAccountId.trim();
+        String canonicalMerchantAccountId = merchantAccountId.trim();
+        if (canonicalPayerAccountId.equals(canonicalMerchantAccountId)) {
             throw new IllegalArgumentException("payerAccountId and merchantAccountId must be different");
         }
         if (amount == null || amount.signum() <= 0) {
@@ -28,11 +30,19 @@ public record PaymentRequest(
             throw new IllegalArgumentException("currency must not be blank");
         }
         return new PaymentRequest(
-                payerAccountId.trim(),
-                merchantAccountId.trim(),
-                amount.setScale(2, RoundingMode.UNNECESSARY),
+                canonicalPayerAccountId,
+                canonicalMerchantAccountId,
+                canonicalAmount(),
                 currency.trim().toUpperCase(Locale.ROOT)
         );
+    }
+
+    private BigDecimal canonicalAmount() {
+        try {
+            return amount.setScale(2, RoundingMode.UNNECESSARY);
+        } catch (ArithmeticException exception) {
+            throw new IllegalArgumentException("amount must have at most two decimal places", exception);
+        }
     }
 
     public String payloadFingerprint() {

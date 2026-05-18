@@ -77,7 +77,18 @@ Covered by `PaymentControllerIntegrationTest`:
 - Idempotency records are in-memory; production requires durable storage with a uniqueness constraint.
 - Ledger entries are in-memory; production requires transactional persistence.
 - The current in-memory idempotency reservation is sufficient for the demo, not a distributed concurrency strategy.
+- The next production slice is the durable transaction boundary: idempotency record, payment record, ledger transaction, ledger entries, and optional outbox event must commit atomically.
 - No reconciliation worker exists yet.
 - No transactional outbox exists yet.
 - No auth, tenant model, or risk controls exist yet.
 - Observability is limited to baseline Actuator endpoints.
+
+## Next Engineering Slice
+
+The next slice should not add more endpoints. It should harden the correctness boundary:
+
+- define Postgres-style schemas for `idempotency_records`, `payments`, `ledger_transactions`, `ledger_entries`, and `outbox_events`;
+- enforce a uniqueness constraint on the idempotency key, scoped by tenant/account in production;
+- write idempotency state and ledger mutation in one database transaction;
+- introduce a ledger posting rule boundary so balanced entries are produced by an explicit accounting rule;
+- add failure-oriented tests around duplicate concurrency, rollback, and replay after ambiguous completion.

@@ -16,6 +16,8 @@ The hardest part is defining the correct ownership boundary for a logical paymen
 
 The first slice uses in-memory state to prove semantics quickly. That improves learning speed and testability, but it is not production-ready. The production path requires durable storage, transaction boundaries, uniqueness constraints, and reconciliation.
 
+The current design deliberately stops before adding more API surface. The next leverage point is the durable transaction boundary: idempotency outcome, payment state, ledger transaction, ledger entries, and optional outbox event must commit together.
+
 ## Failure Scenario
 
 A client sends a payment, the server commits it, but the response is lost. The client retries with the same key. The correct behavior is to return the original response and avoid new ledger entries.
@@ -29,6 +31,7 @@ A client sends a payment, the server commits it, but the response is lost. The c
 - Add reconciliation jobs.
 - Emit outbox events for downstream processing.
 - Add metrics for accepted, replayed, conflict, and invalid requests.
+- Add a posting rule boundary so ledger entries are generated and validated consistently.
 
 ## How I Would Operate This In Production
 

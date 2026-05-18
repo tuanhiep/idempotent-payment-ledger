@@ -43,6 +43,8 @@ The system rejects the request before mutating ledger state.
 Current evidence:
 
 - `PaymentIntakeServiceTest.invalidAmountIsRejectedBeforeLedgerMutation`
+- `PaymentIntakeServiceTest.sameAccountAfterTrimmingIsRejectedBeforeLedgerMutation`
+- `PaymentIntakeServiceTest.amountWithMoreThanTwoDecimalPlacesIsRejectedBeforeLedgerMutation`
 
 ## Partial Commit Between Ledger And Idempotency Record
 
@@ -89,3 +91,13 @@ The transaction must be rejected or reconciled. A valid transaction must have of
 Current evidence:
 
 - `PaymentIntakeServiceTest.firstPaymentCreatesBalancedLedgerEntries`
+
+Current limitation:
+
+The first slice proves the happy-path invariant for the generated payment transaction. It does not yet have a dedicated `LedgerTransaction` aggregate or posting-rule validator that rejects arbitrary unbalanced entry sets before persistence.
+
+Next slice:
+
+- introduce an explicit posting rule boundary;
+- validate that generated entries balance before commit;
+- persist `ledger_transactions` and `ledger_entries` inside the same database transaction as the idempotency outcome.

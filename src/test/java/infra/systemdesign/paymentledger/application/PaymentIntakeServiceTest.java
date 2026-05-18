@@ -118,6 +118,36 @@ class PaymentIntakeServiceTest {
         assertThat(ledgerStore.entryCount()).isZero();
     }
 
+    @Test
+    void sameAccountAfterTrimmingIsRejectedBeforeLedgerMutation() {
+        PaymentRequest invalid = new PaymentRequest(
+                "acct-payer ",
+                "acct-payer",
+                new BigDecimal("1.00"),
+                "USD"
+        );
+
+        assertThatThrownBy(() -> paymentIntakeService.process("pay-005", invalid))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("must be different");
+        assertThat(ledgerStore.entryCount()).isZero();
+    }
+
+    @Test
+    void amountWithMoreThanTwoDecimalPlacesIsRejectedBeforeLedgerMutation() {
+        PaymentRequest invalid = new PaymentRequest(
+                "acct-payer",
+                "acct-merchant",
+                new BigDecimal("1.001"),
+                "USD"
+        );
+
+        assertThatThrownBy(() -> paymentIntakeService.process("pay-006", invalid))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("at most two decimal places");
+        assertThat(ledgerStore.entryCount()).isZero();
+    }
+
     private static PaymentRequest request(String amount) {
         return new PaymentRequest(
                 "acct-payer",

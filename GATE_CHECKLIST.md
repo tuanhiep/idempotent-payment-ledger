@@ -8,14 +8,16 @@
 - [x] Duplicate idempotency key with changed payload is rejected.
 - [x] Ledger entries for one transaction balance to zero.
 - [x] Invalid amount is rejected before ledger mutation.
+- [x] Same account after canonical trimming is rejected before ledger mutation.
+- [x] Amount scale violations return domain validation errors instead of leaking arithmetic failures.
 
 ## Architecture
 
 - [x] Initial design doc exists.
 - [x] Goals and non-goals are explicit.
 - [x] First trade-offs are documented.
-- [ ] Durable storage alternatives are compared.
-- [ ] Transaction boundary is represented with a production persistence design.
+- [x] Durable storage alternatives are compared.
+- [x] Transaction boundary is represented with a production persistence design.
 
 ## Implementation
 
@@ -34,13 +36,14 @@
 
 ## Scale
 
-- [ ] Scale assumptions are documented.
+- [x] Scale assumptions are documented.
 - [ ] Load test exists.
 - [ ] Capacity estimate exists.
 
 ## Failure
 
 - [x] Initial failure modes are documented.
+- [x] Ledger imbalance limitation and next slice are documented.
 - [ ] Recovery path is implemented for reconciliation.
 - [ ] Timeout-after-commit scenario is simulated.
 

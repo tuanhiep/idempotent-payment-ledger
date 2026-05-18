@@ -44,6 +44,7 @@ Human-owned decisions:
 - Replaced the service-level critical section with an `IdempotencyStore` abstraction. The completed idempotency outcome is immutable; in-progress coordination is hidden inside the in-memory store.
 - Added a concurrent duplicate-request service test using virtual threads.
 - Kept durable database uniqueness constraints as the production correctness boundary.
+- Documented the durable transaction boundary as the next slice before implementing persistence code.
 
 ## Final Engineering Judgment
 
@@ -55,6 +56,7 @@ The first slice is intentionally narrow. It is not production-ready, but it esta
 - Add a uniqueness constraint on idempotency key scoped by tenant/account.
 - Store in-progress records to handle long-running calls.
 - Insert payment, ledger entries, idempotency record, and outbox event in one transaction.
+- Introduce an explicit posting rule boundary and validate ledger balance before persistence.
 - Add reconciliation jobs.
 - Add domain metrics and alerts.
 - Add auth, tenant isolation, and fraud/risk checks.
