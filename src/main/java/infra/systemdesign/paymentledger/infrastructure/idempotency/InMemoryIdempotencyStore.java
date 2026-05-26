@@ -9,9 +9,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Repository;
 
 @Repository
+@Profile("!jpa")
 public class InMemoryIdempotencyStore implements IdempotencyStore {
 
     private final Map<String, InFlightRecord> records = new ConcurrentHashMap<>();

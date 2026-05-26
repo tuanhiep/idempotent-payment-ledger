@@ -2,6 +2,7 @@ package infra.systemdesign.paymentledger.api;
 
 import infra.systemdesign.paymentledger.domain.DuplicateIdempotencyKeyException;
 import infra.systemdesign.paymentledger.application.PaymentIntakeService;
+import infra.systemdesign.paymentledger.domain.PaymentInProgressException;
 import infra.systemdesign.paymentledger.domain.PaymentRequest;
 import infra.systemdesign.paymentledger.domain.PaymentResponse;
 import org.springframework.http.HttpStatus;
@@ -35,6 +36,14 @@ class PaymentController {
     ResponseEntity<ErrorResponse> duplicateIdempotencyKey(DuplicateIdempotencyKeyException exception) {
         return ResponseEntity.status(HttpStatus.CONFLICT)
                 .body(new ErrorResponse("IDEMPOTENCY_KEY_REUSED_WITH_DIFFERENT_PAYLOAD", exception.getMessage()));
+    }
+
+    @ExceptionHandler(PaymentInProgressException.class)
+    ResponseEntity<ErrorResponse> paymentInProgress(PaymentInProgressException exception) {
+        // 425 Too Early: the original request is still being processed.
+        // The client should retry after a short delay.
+        return ResponseEntity.status(425)
+                .body(new ErrorResponse("PAYMENT_IN_PROGRESS", exception.getMessage()));
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

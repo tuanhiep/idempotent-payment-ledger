@@ -56,7 +56,7 @@ Production target:
 
 ## Proposed Architecture
 
-This module uses a pragmatic ports-and-adapters layout. The payment intake use case depends on application ports (`IdempotencyStore`, `LedgerStore`), while the first slice provides in-memory infrastructure adapters. This keeps retry/ledger correctness policy separate from the storage mechanism and gives the module a clean path toward Postgres-backed persistence.
+This module uses a pragmatic ports-and-adapters layout. The payment intake use case depends on application ports (`IdempotencyStore`, `LedgerStore`), while infrastructure adapters can be swapped between fast in-memory semantics tests and the JPA/PostgreSQL persistence slice. This keeps retry/ledger correctness policy separate from the storage mechanism and makes the database boundary testable without moving persistence concerns into the application service.
 
 ```mermaid
 flowchart TD
@@ -150,16 +150,35 @@ The production design should rely on a database transaction and a uniqueness con
 
 ## Durable Transaction Boundary
 
-The next slice should make the write boundary explicit before adding more product features.
+The full DDL is in `src/main/resources/db/migration/V1__init_payment_ledger.sql`.
+The persistence design decision is recorded in `docs/ADR-001-persistence-schema.md`.
 
-The production transaction should commit these facts together:
+The production transaction commits these five writes atomically:
 
-```text
-idempotency_records: the request key, payload hash, request body, response body, and status
-payments: the accepted payment intent/outcome
-ledger_transactions: the accounting event for the payment
-ledger_entries: the balanced debit and credit postings
-outbox_events: optional domain event for async publication
+```sql
+BEGIN;
+  -- Step 1: claim the idempotency key (race condition guard)
+  INSERT INTO idempotency_records (tenant_id, idempotency_key, payload_hash,
+      request_body, status, expires_at)
+  VALUES (?, ?, ?, ?, 'PROCESSING', now() + interval '7 days');
+  -- If a duplicate key exists, Postgres raises a unique constraint violation.
+  -- The caller catches this, reads the existing record, and either replays
+  -- (status = ACCEPTED) or waits/rejects (status = PROCESSING).
+
+  -- Step 2: write business state
+  INSERT INTO payments (payment_id, tenant_id, idempotency_key, ...);
+  INSERT INTO ledger_transactions (transaction_id, payment_id, posting_rule, ...);
+  INSERT INTO ledger_entries (entry_id, transaction_id, account_id, 'DEBIT',  amount, ...);
+  INSERT INTO ledger_entries (entry_id, transaction_id, account_id, 'CREDIT', amount, ...);
+
+  -- Step 3: register outbox event (same transaction — never lost)
+  INSERT INTO outbox_events (aggregate_id, event_type, payload, ...);
+
+  -- Step 4: complete the idempotency record
+  UPDATE idempotency_records
+     SET status = 'ACCEPTED', response_body = ?, completed_at = now()
+   WHERE tenant_id = ? AND idempotency_key = ?;
+COMMIT;
 ```
 
 Atomicity rule:
@@ -169,15 +188,48 @@ If the ledger mutation commits, the idempotency outcome must also commit.
 If the idempotency outcome commits, the ledger mutation must also commit.
 ```
 
-This prevents the dangerous middle state where a retry cannot tell whether the original request created ledger side effects.
+This prevents the dangerous middle state where a retry cannot tell whether
+the original request created ledger side effects.
 
-Recommended production uniqueness boundary:
+### Race Condition Strategy
+
+The `UNIQUE (tenant_id, idempotency_key)` constraint is the primary
+concurrency control mechanism — not application-level locks.
+
+```
+Request A ──► INSERT idempotency_records ──► wins, continues transaction
+Request B ──► INSERT idempotency_records ──► unique violation
+                                              └─► SELECT existing record
+                                                  ├─► PROCESSING → wait or 425
+                                                  └─► ACCEPTED   → replay response
+```
+
+This is preferred over `SELECT FOR UPDATE` (requires a prior SELECT) and Redis
+locks (adds a failure domain without stronger atomicity guarantees).
+
+### Index Strategy
+
+```
+idempotency_records: (tenant_id, idempotency_key)  — lookup on every request
+idempotency_records: (expires_at) WHERE ACCEPTED   — TTL cleanup job
+payments:            (tenant_id, idempotency_key)  — reconciliation
+payments:            (payer_account_id, created_at DESC)    — payer statement
+payments:            (merchant_account_id, created_at DESC) — merchant settlement
+ledger_transactions: (payment_id)                  — forward join
+ledger_entries:      (transaction_id)              — balance check
+ledger_entries:      (account_id, created_at DESC) — account history
+outbox_events:       (created_at) WHERE published_at IS NULL — poller scan
+```
+
+Uniqueness boundary:
 
 ```text
 UNIQUE (tenant_id, idempotency_key)
 ```
 
-The first implementation may use a narrower single-tenant key, but the design should remain tenant-scoped because idempotency keys are caller-generated and must not collide globally across tenants.
+The first implementation may use a single-tenant key, but the design remains
+tenant-scoped because idempotency keys are caller-generated and must not
+collide globally across tenants.
 
 ## Posting Rule Boundary
 

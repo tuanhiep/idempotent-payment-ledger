@@ -7,11 +7,13 @@ import java.util.List;
 
 public interface LedgerStore {
 
-    String recordPayment(PaymentRequest request);
+    LedgerWriteResult recordPayment(String idempotencyKey, PaymentRequest request);
 
     List<LedgerEntry> entriesForTransaction(String transactionId);
 
     BigDecimal balanceForTransaction(String transactionId);
 
     int entryCount();
+
+    record LedgerWriteResult(String paymentId, String ledgerTransactionId) {}
 }

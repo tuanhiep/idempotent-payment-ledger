@@ -2,16 +2,19 @@ package infra.systemdesign.paymentledger.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import infra.systemdesign.paymentledger.support.PostgresIntegrationTestSupport;
 import java.math.BigDecimal;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.http.HttpStatusCode;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.web.client.RestClient;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-class PaymentControllerIntegrationTest {
+@ActiveProfiles("jpa")
+class PaymentControllerIntegrationTest extends PostgresIntegrationTestSupport {
 
     @LocalServerPort
     private int port;

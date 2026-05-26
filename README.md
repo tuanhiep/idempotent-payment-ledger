@@ -27,13 +27,14 @@ The system must make payment intake retry-safe while preserving auditability and
 - A successful payment creates exactly two ledger entries: one debit and one credit.
 - Ledger entries for one transaction must sum to zero.
 - Invalid requests must not mutate ledger state.
-- The current implementation is intentionally in-memory; persistence, locking, and reconciliation are production follow-ups.
+- The durable adapter uses PostgreSQL uniqueness and Flyway-managed schema as the production-like correctness boundary.
 
 ## Implemented Endpoints
 
 Run:
 
 ```bash
+docker compose -f system-design/idempotent-payment-ledger/compose.yml up -d
 ./mvnw -pl system-design/idempotent-payment-ledger spring-boot:run
 ```
 
@@ -72,12 +73,14 @@ Covered by `PaymentControllerIntegrationTest`:
 
 `PaymentLedgerApplicationTests` verifies Spring context wiring.
 
+Persistence tests use PostgreSQL through Testcontainers and the same Flyway
+migration used by local Docker. Docker must be running for the persistence
+suite; these tests fail fast rather than falling back to H2.
+
 ## Production Gaps
 
-- Idempotency records are in-memory; production requires durable storage with a uniqueness constraint.
-- Ledger entries are in-memory; production requires transactional persistence.
-- The current in-memory idempotency reservation is sufficient for the demo, not a distributed concurrency strategy.
-- The next production slice is the durable transaction boundary: idempotency record, payment record, ledger transaction, ledger entries, and optional outbox event must commit atomically.
+- The in-memory adapter remains for fast unit-level semantics tests; production-like tests use the JPA/PostgreSQL adapter.
+- The current JPA adapter stores the idempotency claim before the ledger transaction to expose in-flight duplicate requests; crash recovery for stale `PROCESSING` records is not implemented yet.
 - No reconciliation worker exists yet.
 - No transactional outbox exists yet.
 - No auth, tenant model, or risk controls exist yet.
@@ -87,8 +90,7 @@ Covered by `PaymentControllerIntegrationTest`:
 
 The next slice should not add more endpoints. It should harden the correctness boundary:
 
-- define Postgres-style schemas for `idempotency_records`, `payments`, `ledger_transactions`, `ledger_entries`, and `outbox_events`;
-- enforce a uniqueness constraint on the idempotency key, scoped by tenant/account in production;
-- write idempotency state and ledger mutation in one database transaction;
+- run the Testcontainers suite with Docker enabled and close any schema/runtime gaps it exposes;
+- define stale `PROCESSING` cleanup and retry semantics;
 - introduce a ledger posting rule boundary so balanced entries are produced by an explicit accounting rule;
 - add failure-oriented tests around duplicate concurrency, rollback, and replay after ambiguous completion.

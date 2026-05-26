@@ -12,9 +12,11 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Repository;
 
 @Repository
+@Profile("!jpa")
 public class InMemoryLedgerStore implements LedgerStore {
 
     private final List<LedgerEntry> entries = new ArrayList<>();
@@ -25,9 +27,10 @@ public class InMemoryLedgerStore implements LedgerStore {
         this.clock = clock;
     }
 
-    public String recordPayment(PaymentRequest request) {
+    public LedgerWriteResult recordPayment(String idempotencyKey, PaymentRequest request) {
         lock.lock();
         try {
+            String paymentId = UUID.randomUUID().toString();
             String transactionId = UUID.randomUUID().toString();
             Instant now = clock.instant();
             entries.add(new LedgerEntry(
@@ -48,7 +51,7 @@ public class InMemoryLedgerStore implements LedgerStore {
                     request.currency(),
                     now
             ));
-            return transactionId;
+            return new LedgerWriteResult(paymentId, transactionId);
         } finally {
             lock.unlock();
         }

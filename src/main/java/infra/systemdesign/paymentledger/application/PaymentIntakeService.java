@@ -2,6 +2,7 @@ package infra.systemdesign.paymentledger.application;
 
 import infra.systemdesign.paymentledger.application.port.IdempotencyStore;
 import infra.systemdesign.paymentledger.application.port.LedgerStore;
+import infra.systemdesign.paymentledger.application.port.LedgerStore.LedgerWriteResult;
 import infra.systemdesign.paymentledger.domain.DuplicateIdempotencyKeyException;
 import infra.systemdesign.paymentledger.domain.PaymentRequest;
 import infra.systemdesign.paymentledger.domain.PaymentResponse;
@@ -10,8 +11,8 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.util.HexFormat;
-import java.util.UUID;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class PaymentIntakeService {
@@ -26,6 +27,7 @@ public class PaymentIntakeService {
         this.clock = clock;
     }
 
+    @Transactional
     public PaymentResponse process(String idempotencyKey, PaymentRequest request) {
         String normalizedKey = normalizeKey(idempotencyKey);
         PaymentRequest canonicalRequest = request.canonical();
@@ -38,10 +40,10 @@ public class PaymentIntakeService {
 
         IdempotencyStore.NewReservation newReservation = (IdempotencyStore.NewReservation) reservation;
         try {
-            String ledgerTransactionId = ledgerStore.recordPayment(canonicalRequest);
+            LedgerWriteResult ledgerWrite = ledgerStore.recordPayment(normalizedKey, canonicalRequest);
             PaymentResponse response = new PaymentResponse(
-                    UUID.randomUUID().toString(),
-                    ledgerTransactionId,
+                    ledgerWrite.paymentId(),
+                    ledgerWrite.ledgerTransactionId(),
                     "ACCEPTED",
                     canonicalRequest.amount(),
                     canonicalRequest.currency(),

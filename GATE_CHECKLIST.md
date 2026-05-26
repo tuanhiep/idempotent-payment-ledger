@@ -18,6 +18,9 @@
 - [x] First trade-offs are documented.
 - [x] Durable storage alternatives are compared.
 - [x] Transaction boundary is represented with a production persistence design.
+- [x] Postgres Flyway migration exists with tables, constraints, and indexes (`src/main/resources/db/migration/V1__init_payment_ledger.sql`).
+- [x] ADR-001 documents persistence design decision and lock strategy.
+- [x] JPA persistence adapters replace in-memory adapters (`JpaIdempotencyStore`, `JpaLedgerStore`).
 
 ## Implementation
 
@@ -52,12 +55,13 @@
 - [ ] Trust boundary for idempotency keys is documented.
 - [ ] Tenant/auth model is documented.
 
-## Narrative
+## Engineering Communication
 
-- [x] Interview narrative exists.
-- [ ] CV bullet is derived from this module.
+- [x] Engineering narrative exists.
+- [ ] Key design trade-offs are summarized for design review.
+- [ ] Production gaps are explicitly documented with next steps.
 
-## AI Ownership
+## Engineering Review
 
 - [x] Architect notes exist.
-- [ ] AI mistakes and corrections are logged after first red-team pass.
+- [ ] Implementation assumptions and review findings are documented after first red-team pass.
