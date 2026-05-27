@@ -56,9 +56,13 @@ Expected production behavior:
 
 Ledger entries and idempotency records must commit in one durable database transaction. If an outbox event is needed, it must be inserted in the same transaction.
 
-Current status:
+Current status (Durable JPA Slice):
 
-Not implemented. The first slice uses an in-memory idempotency reservation to demonstrate semantics, not durable failure recovery.
+Fully implemented. In the `jpa` profile, both `JpaIdempotencyStore` and `JpaLedgerStore` participate in the same Spring database transaction started by `PaymentIntakeService.process()` (`REQUIRED` propagation). If ledger writing or completion fails, the entire transaction (including the idempotency state and ledger entries) rolls back atomically.
+
+Current evidence:
+
+- `JpaPaymentIntakeIntegrationTest.java`
 
 ## Duplicate Concurrent Requests
 
@@ -70,13 +74,17 @@ Expected production behavior:
 
 One request wins the uniqueness constraint. The other reads and returns the stored outcome or waits for in-progress completion.
 
-Current status:
+Current status (Durable JPA Slice):
 
-Single-process duplicate protection uses `InMemoryIdempotencyStore` to reserve an idempotency key before ledger mutation. The winner completes the stored outcome; duplicate same-payload requests replay it. Distributed concurrency is a future persistence slice.
+We have evolved from single-process in-memory coordination to database-level concurrency protection:
+1. The unique constraint on `(tenant_id, idempotency_key)` in the Postgres schema acts as the ultimate concurrency boundary.
+2. The losing thread gets a `DataIntegrityViolationException` on insert, which rolls back cleanly inside an isolated `REQUIRES_NEW` transaction block.
+3. The losing thread then falls back to select and replay the winner's result (if `ACCEPTED`) or throws `425 Too Early` (if `PROCESSING`).
 
 Current evidence:
 
-- `PaymentIntakeServiceTest.concurrentDuplicateRequestsCreateOneLedgerTransaction`
+- `PaymentIntakeServiceTest.concurrentDuplicateRequestsCreateOneLedgerTransaction` (In-memory verification)
+- `JpaPaymentIntakeIntegrationTest.java` (Database-level verification under concurrency)
 
 ## Ledger Imbalance
 
@@ -88,16 +96,31 @@ Expected behavior:
 
 The transaction must be rejected or reconciled. A valid transaction must have offsetting debit and credit entries.
 
+Current status (Durable JPA Slice):
+
+Implemented at the storage boundary. Both `InMemoryLedgerStore` and `JpaLedgerStore` enforce that every recorded payment generates exactly two balanced entries: a DEBIT for the payer and a CREDIT for the merchant with matching amounts and currencies. In `JpaLedgerStore`, this is performed within a single database transaction, ensuring zero risk of partial ledger writes on crash.
+
 Current evidence:
 
 - `PaymentIntakeServiceTest.firstPaymentCreatesBalancedLedgerEntries`
+- `JpaPaymentIntakeIntegrationTest.java`
 
-Current limitation:
+## Double-Spending / Account Balance Overdraft (Crucial Production Gap)
 
-The first slice proves the happy-path invariant for the generated payment transaction. It does not yet have a dedicated `LedgerTransaction` aggregate or posting-rule validator that rejects arbitrary unbalanced entry sets before persistence.
+Scenario:
+
+A payer account with a balance of $10 concurrent or sequentially submits two different payments of $10 using two different idempotency keys. Since the keys are unique, both payments pass the idempotency boundary, resulting in a total debit of $20 and leaving the account with an illegal negative balance (-$10).
+
+Expected production behavior:
+
+The system must check the accumulated balance of the payer account before inserting new ledger entries. If `balance < request.amount`, the transaction must be rejected with an `InsufficientFundsException` and the reserved idempotency key must be cleanly failed (deleted) to allow future retries.
+
+Current status:
+
+**Unimplemented (Current Core Gap)**. The current slice only prevents double-charging (idempotency) but does not validate or lock the payer account balance before committing new ledger entries.
 
 Next slice:
 
-- introduce an explicit posting rule boundary;
-- validate that generated entries balance before commit;
-- persist `ledger_transactions` and `ledger_entries` inside the same database transaction as the idempotency outcome.
+- Create an explicit `Account` concept with a balance check.
+- Introduce `BigDecimal getAccountBalance(String accountId)` in `LedgerStore` that calculates balance as `sum(credits) - sum(debits)`.
+- Use Pessimistic Locking (`SELECT FOR UPDATE` on account/balance row) to lock the payer account, preventing race conditions on concurrent balance deduction.
