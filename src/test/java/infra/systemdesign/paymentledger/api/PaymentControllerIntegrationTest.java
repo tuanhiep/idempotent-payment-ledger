@@ -14,6 +14,14 @@ import org.springframework.web.client.RestClient;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @ActiveProfiles("jpa")
+@org.springframework.test.context.jdbc.Sql(
+        statements = {
+            "TRUNCATE TABLE ledger_entries, ledger_transactions, payments, idempotency_records, outbox_events, accounts RESTART IDENTITY CASCADE",
+            "INSERT INTO accounts (account_id, tenant_id, balance, currency, created_at, updated_at) VALUES ('acct-payer-http', 'default', 1000.00, 'USD', now(), now())",
+            "INSERT INTO accounts (account_id, tenant_id, balance, currency, created_at, updated_at) VALUES ('acct-merchant-http', 'default', 0.00, 'USD', now(), now())"
+        },
+        executionPhase = org.springframework.test.context.jdbc.Sql.ExecutionPhase.BEFORE_TEST_METHOD
+)
 class PaymentControllerIntegrationTest extends PostgresIntegrationTestSupport {
 
     @LocalServerPort

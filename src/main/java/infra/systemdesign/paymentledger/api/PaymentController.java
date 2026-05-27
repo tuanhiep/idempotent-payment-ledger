@@ -2,6 +2,7 @@ package infra.systemdesign.paymentledger.api;
 
 import infra.systemdesign.paymentledger.domain.DuplicateIdempotencyKeyException;
 import infra.systemdesign.paymentledger.application.PaymentIntakeService;
+import infra.systemdesign.paymentledger.domain.InsufficientFundsException;
 import infra.systemdesign.paymentledger.domain.PaymentInProgressException;
 import infra.systemdesign.paymentledger.domain.PaymentRequest;
 import infra.systemdesign.paymentledger.domain.PaymentResponse;
@@ -44,6 +45,12 @@ class PaymentController {
         // The client should retry after a short delay.
         return ResponseEntity.status(425)
                 .body(new ErrorResponse("PAYMENT_IN_PROGRESS", exception.getMessage()));
+    }
+
+    @ExceptionHandler(InsufficientFundsException.class)
+    ResponseEntity<ErrorResponse> insufficientFunds(InsufficientFundsException exception) {
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
+                .body(new ErrorResponse("INSUFFICIENT_FUNDS", exception.getMessage()));
     }
 
     @ExceptionHandler(IllegalArgumentException.class)

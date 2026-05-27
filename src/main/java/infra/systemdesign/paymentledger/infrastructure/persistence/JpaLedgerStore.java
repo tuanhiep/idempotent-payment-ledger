@@ -1,12 +1,15 @@
 package infra.systemdesign.paymentledger.infrastructure.persistence;
 
 import infra.systemdesign.paymentledger.application.port.LedgerStore;
+import infra.systemdesign.paymentledger.domain.InsufficientFundsException;
 import infra.systemdesign.paymentledger.domain.LedgerEntry;
 import infra.systemdesign.paymentledger.domain.LedgerEntryType;
 import infra.systemdesign.paymentledger.domain.PaymentRequest;
+import infra.systemdesign.paymentledger.infrastructure.persistence.entity.AccountEntity;
 import infra.systemdesign.paymentledger.infrastructure.persistence.entity.LedgerEntryEntity;
 import infra.systemdesign.paymentledger.infrastructure.persistence.entity.LedgerTransactionEntity;
 import infra.systemdesign.paymentledger.infrastructure.persistence.entity.PaymentEntity;
+import infra.systemdesign.paymentledger.infrastructure.persistence.repository.AccountJpaRepository;
 import infra.systemdesign.paymentledger.infrastructure.persistence.repository.LedgerEntryJpaRepository;
 import infra.systemdesign.paymentledger.infrastructure.persistence.repository.LedgerTransactionJpaRepository;
 import infra.systemdesign.paymentledger.infrastructure.persistence.repository.PaymentJpaRepository;
@@ -43,24 +46,26 @@ public class JpaLedgerStore implements LedgerStore {
     private final PaymentJpaRepository paymentRepository;
     private final LedgerTransactionJpaRepository ledgerTransactionRepository;
     private final LedgerEntryJpaRepository ledgerEntryRepository;
+    private final AccountJpaRepository accountRepository;
     private final Clock clock;
 
     public JpaLedgerStore(
             PaymentJpaRepository paymentRepository,
             LedgerTransactionJpaRepository ledgerTransactionRepository,
             LedgerEntryJpaRepository ledgerEntryRepository,
+            AccountJpaRepository accountRepository,
             Clock clock) {
         this.paymentRepository = paymentRepository;
         this.ledgerTransactionRepository = ledgerTransactionRepository;
         this.ledgerEntryRepository = ledgerEntryRepository;
+        this.accountRepository = accountRepository;
         this.clock = clock;
     }
 
     /**
      * Records the payment, ledger transaction, and two balanced ledger entries.
      *
-     * <p>All three INSERTs participate in the caller's transaction (REQUIRED).
-     * Rollback of the outer transaction rolls back all three writes atomically.
+     * <p>All operations participate in the caller's transaction (REQUIRED).
      *
      * @return the ledger transaction ID
      */
@@ -68,10 +73,38 @@ public class JpaLedgerStore implements LedgerStore {
     @Transactional(propagation = Propagation.REQUIRED)
     public LedgerWriteResult recordPayment(String idempotencyKey, PaymentRequest request) {
         OffsetDateTime now = OffsetDateTime.ofInstant(clock.instant(), ZoneOffset.UTC);
+
+        // Consistent Locking Order to prevent deadlock between concurrent cross-transfers
+        String payerId = request.payerAccountId();
+        String merchantId = request.merchantAccountId();
+        String firstId = payerId.compareTo(merchantId) < 0 ? payerId : merchantId;
+        String secondId = payerId.compareTo(merchantId) < 0 ? merchantId : payerId;
+
+        // Step 0: Lock accounts in a strictly defined order using SELECT FOR UPDATE
+        AccountEntity firstAccount = accountRepository.findByTenantIdAndAccountId(TENANT_ID, firstId)
+                .orElseThrow(() -> new IllegalArgumentException("Account not found: " + firstId));
+        AccountEntity secondAccount = accountRepository.findByTenantIdAndAccountId(TENANT_ID, secondId)
+                .orElseThrow(() -> new IllegalArgumentException("Account not found: " + secondId));
+
+        AccountEntity payer = payerId.equals(firstId) ? firstAccount : secondAccount;
+        AccountEntity merchant = merchantId.equals(firstId) ? firstAccount : secondAccount;
+
+        // Step 1: Validate balance (Overdraft protection / Double-spending prevention)
+        if (payer.getBalance().compareTo(request.amount()) < 0) {
+            throw new InsufficientFundsException(
+                    "insufficient funds in payer account " + payerId + " (balance: " + payer.getBalance() + ")");
+        }
+
+        // Step 2: Deduct from payer, add to merchant
+        payer.setBalance(payer.getBalance().subtract(request.amount()));
+        payer.setUpdatedAt(now);
+        merchant.setBalance(merchant.getBalance().add(request.amount()));
+        merchant.setUpdatedAt(now);
+
         String paymentId = UUID.randomUUID().toString();
         String transactionId = UUID.randomUUID().toString();
 
-        // Step 1: insert the payment record
+        // Step 3: insert the payment record
         paymentRepository.save(new PaymentEntity(
                 paymentId,
                 TENANT_ID,
@@ -84,7 +117,7 @@ public class JpaLedgerStore implements LedgerStore {
                 now
         ));
 
-        // Step 2: insert the ledger transaction (accounting event)
+        // Step 4: insert the ledger transaction (accounting event)
         ledgerTransactionRepository.save(new LedgerTransactionEntity(
                 transactionId,
                 paymentId,
@@ -94,7 +127,7 @@ public class JpaLedgerStore implements LedgerStore {
                 now
         ));
 
-        // Step 3: insert balanced debit + credit entries
+        // Step 5: insert balanced debit + credit entries
         ledgerEntryRepository.save(new LedgerEntryEntity(
                 UUID.randomUUID().toString(),
                 transactionId,
@@ -139,6 +172,14 @@ public class JpaLedgerStore implements LedgerStore {
     @Transactional(propagation = Propagation.REQUIRED, readOnly = true)
     public int entryCount() {
         return (int) ledgerEntryRepository.count();
+    }
+
+    @Override
+    @Transactional(propagation = Propagation.REQUIRED, readOnly = true)
+    public BigDecimal getAccountBalance(String accountId) {
+        return accountRepository.findReadOnlyByTenantIdAndAccountId(TENANT_ID, accountId)
+                .map(AccountEntity::getBalance)
+                .orElse(BigDecimal.ZERO);
     }
 
     private LedgerEntry toDomain(LedgerEntryEntity entity) {

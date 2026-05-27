@@ -15,5 +15,7 @@ public interface LedgerStore {
 
     int entryCount();
 
+    BigDecimal getAccountBalance(String accountId);
+
     record LedgerWriteResult(String paymentId, String ledgerTransactionId) {}
 }

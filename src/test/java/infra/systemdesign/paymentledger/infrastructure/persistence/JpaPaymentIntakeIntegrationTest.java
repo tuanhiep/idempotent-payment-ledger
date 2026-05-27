@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import infra.systemdesign.paymentledger.application.PaymentIntakeService;
 import infra.systemdesign.paymentledger.domain.DuplicateIdempotencyKeyException;
+import infra.systemdesign.paymentledger.domain.InsufficientFundsException;
 import infra.systemdesign.paymentledger.domain.LedgerEntry;
 import infra.systemdesign.paymentledger.domain.PaymentRequest;
 import infra.systemdesign.paymentledger.domain.PaymentResponse;
@@ -12,6 +13,11 @@ import infra.systemdesign.paymentledger.infrastructure.persistence.repository.Le
 import infra.systemdesign.paymentledger.support.PostgresIntegrationTestSupport;
 import java.math.BigDecimal;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -24,22 +30,15 @@ import org.springframework.test.context.jdbc.Sql;
  * <p>Activates the {@code jpa} profile which wires JpaIdempotencyStore and JpaLedgerStore
  * instead of the in-memory adapters. Flyway applies the same PostgreSQL migration that local
  * Docker and production-like environments use.
- *
- * <p>Tests prove:
- * <ul>
- *   <li>First payment creates balanced ledger entries in the database.</li>
- *   <li>Duplicate same-payload request replays from the database without new entries.</li>
- *   <li>Duplicate key with different payload is rejected (409 — DB constraint not reached
- *       because payload hash check fires first).</li>
- *   <li>Invalid request is rejected before any ledger mutation.</li>
- *   <li>Ledger entries for one transaction balance to zero (reconciliation invariant).</li>
- * </ul>
  */
 @SpringBootTest
 @ActiveProfiles("jpa")
 @Sql(
-        statements = "TRUNCATE TABLE ledger_entries, ledger_transactions, payments, "
-                + "idempotency_records, outbox_events RESTART IDENTITY CASCADE",
+        statements = {
+            "TRUNCATE TABLE ledger_entries, ledger_transactions, payments, idempotency_records, outbox_events, accounts RESTART IDENTITY CASCADE",
+            "INSERT INTO accounts (account_id, tenant_id, balance, currency, created_at, updated_at) VALUES ('acct-payer', 'default', 1000.00, 'USD', now(), now())",
+            "INSERT INTO accounts (account_id, tenant_id, balance, currency, created_at, updated_at) VALUES ('acct-merchant', 'default', 0.00, 'USD', now(), now())"
+        },
         executionPhase = Sql.ExecutionPhase.BEFORE_TEST_METHOD
 )
 class JpaPaymentIntakeIntegrationTest extends PostgresIntegrationTestSupport {
@@ -107,7 +106,6 @@ class JpaPaymentIntakeIntegrationTest extends PostgresIntegrationTestSupport {
         PaymentResponse response = paymentIntakeService.process("jpa-005", request("250.00"));
 
         // Reconciliation query: SUM(CREDIT) - SUM(DEBIT) must equal zero for any transaction.
-        // This is the core double-entry ledger invariant verified via the actual DB.
         BigDecimal balance = jpaLedgerStore.balanceForTransaction(response.ledgerTransactionId());
 
         assertThat(balance)
@@ -125,6 +123,67 @@ class JpaPaymentIntakeIntegrationTest extends PostgresIntegrationTestSupport {
         assertThat(jpaLedgerStore.balanceForTransaction(second.ledgerTransactionId()))
                 .isEqualByComparingTo(BigDecimal.ZERO);
         assertThat(ledgerEntryRepository.count()).isEqualTo(4);
+    }
+
+    @Test
+    void insufficientFundsIsRejectedAndRollsBack() {
+        // acct-payer has $1000.00 initially in DB. Try to pay $1001.00
+        PaymentRequest huge = request("1001.00");
+
+        assertThatThrownBy(() -> paymentIntakeService.process("jpa-huge", huge))
+                .isInstanceOf(InsufficientFundsException.class)
+                .hasMessageContaining("insufficient funds");
+
+        // DB state is clean — no entries recorded, balance remains unchanged
+        assertThat(ledgerEntryRepository.count()).isZero();
+        assertThat(jpaLedgerStore.getAccountBalance("acct-payer")).isEqualByComparingTo("1000.0000");
+    }
+
+    @Test
+    void concurrentDoubleSpendingPreventedByDurableOverdraftProtection() throws Exception {
+        // Giả lập 10 threads đồng thời thực hiện 10 payments khác nhau (10 keys khác nhau).
+        // Mỗi request rút $200. Số dư ban đầu = $1000.
+        // Kỳ vọng: Đúng 5 threads thành công (5 x 200 = 1000), 5 threads còn lại bị InsufficientFundsException.
+        int threadCount = 10;
+        CountDownLatch ready = new CountDownLatch(threadCount);
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicInteger successCount = new AtomicInteger();
+        AtomicInteger failureCount = new AtomicInteger();
+
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            var futures = IntStream.range(0, threadCount)
+                    .mapToObj(index -> executor.submit(() -> {
+                        ready.countDown();
+                        start.await(5, TimeUnit.SECONDS);
+                        try {
+                            paymentIntakeService.process("jpa-concurrent-spend-" + index, request("200.00"));
+                            successCount.incrementAndGet();
+                        } catch (InsufficientFundsException e) {
+                            failureCount.incrementAndGet();
+                        }
+                        return null;
+                    }))
+                    .toList();
+
+            assertThat(ready.await(5, TimeUnit.SECONDS)).isTrue();
+            start.countDown();
+
+            // Wait for all virtual threads to complete
+            for (var future : futures) {
+                future.get(10, TimeUnit.SECONDS);
+            }
+
+            // Verify outcomes
+            assertThat(successCount.get()).isEqualTo(5);
+            assertThat(failureCount.get()).isEqualTo(5);
+
+            // DB Verification: Payer balance is exactly 0.00, Merchant is exactly 1000.00
+            assertThat(jpaLedgerStore.getAccountBalance("acct-payer")).isEqualByComparingTo("0.0000");
+            assertThat(jpaLedgerStore.getAccountBalance("acct-merchant")).isEqualByComparingTo("1000.0000");
+
+            // Total ledger entry count is exactly 10 (5 Debit entries + 5 Credit entries)
+            assertThat(ledgerEntryRepository.count()).isEqualTo(10);
+        }
     }
 
     private static PaymentRequest request(String amount) {

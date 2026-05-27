@@ -148,6 +148,16 @@ class PaymentIntakeServiceTest {
         assertThat(ledgerStore.entryCount()).isZero();
     }
 
+    @Test
+    void insufficientFundsPayerIsRejectedBeforeLedgerMutation() {
+        PaymentRequest hugeRequest = request("1001.00");
+
+        assertThatThrownBy(() -> paymentIntakeService.process("pay-huge", hugeRequest))
+                .isInstanceOf(infra.systemdesign.paymentledger.domain.InsufficientFundsException.class)
+                .hasMessageContaining("insufficient funds");
+        assertThat(ledgerStore.entryCount()).isZero();
+    }
+
     private static PaymentRequest request(String amount) {
         return new PaymentRequest(
                 "acct-payer",

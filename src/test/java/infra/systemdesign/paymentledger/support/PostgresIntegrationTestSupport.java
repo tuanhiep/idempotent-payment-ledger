@@ -23,6 +23,7 @@ public abstract class PostgresIntegrationTestSupport {
         registry.add("spring.datasource.password", POSTGRES::getPassword);
         registry.add("spring.datasource.driver-class-name", POSTGRES::getDriverClassName);
         registry.add("spring.jpa.hibernate.ddl-auto", () -> "validate");
+        registry.add("spring.datasource.hikari.maximum-pool-size", () -> "50");
         registry.add("spring.flyway.enabled", () -> "true");
         registry.add("spring.flyway.locations", () -> "classpath:db/migration");
     }
