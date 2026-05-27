@@ -45,10 +45,4 @@ Idempotency is not just "return the same response." It is a contract around logi
 
 This module shows correctness-first thinking: naming invariants, rejecting ambiguous key reuse, modeling balanced ledger entries, documenting production gaps, and designing the path from demo semantics to durable architecture.
 
-## Possible Interview Questions
 
-- How would you make this safe across multiple API instances?
-- What if the first request is still processing when the retry arrives?
-- How long should idempotency records live?
-- How would you reconcile payment records and ledger entries?
-- Why use a database uniqueness constraint instead of Redis locks?
