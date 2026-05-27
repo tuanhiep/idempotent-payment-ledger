@@ -15,7 +15,6 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.jdbc.Sql;
 
@@ -38,7 +37,6 @@ import org.springframework.test.context.jdbc.Sql;
  */
 @SpringBootTest
 @ActiveProfiles("jpa")
-@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_EACH_TEST_METHOD)
 @Sql(
         statements = "TRUNCATE TABLE ledger_entries, ledger_transactions, payments, "
                 + "idempotency_records, outbox_events RESTART IDENTITY CASCADE",
