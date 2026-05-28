@@ -47,8 +47,9 @@ import org.springframework.transaction.support.TransactionTemplate;
  * <p>Active only when the {@code jpa} Spring profile is set.
  */
 @Repository
-@Profile("jpa")
+@Profile("jpa & !redis")
 public class JpaIdempotencyStore implements IdempotencyStore {
+
 
     // Single-tenant placeholder for this slice.
     // Multi-tenancy: derive tenant_id from the security context.

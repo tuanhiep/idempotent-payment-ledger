@@ -13,8 +13,9 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Repository;
 
 @Repository
-@Profile("!jpa")
+@Profile("!jpa & !redis")
 public class InMemoryIdempotencyStore implements IdempotencyStore {
+
 
     private final Map<String, InFlightRecord> records = new ConcurrentHashMap<>();
 

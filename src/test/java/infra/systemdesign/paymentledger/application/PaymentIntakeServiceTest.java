@@ -24,8 +24,9 @@ class PaymentIntakeServiceTest {
 
     private final Clock clock = Clock.fixed(Instant.parse("2026-05-14T09:00:00Z"), ZoneOffset.UTC);
     private final IdempotencyStore idempotencyStore = new InMemoryIdempotencyStore();
-    private final InMemoryLedgerStore ledgerStore = new InMemoryLedgerStore(clock);
+    private final InMemoryLedgerStore ledgerStore = new InMemoryLedgerStore(idempotencyStore, clock);
     private final PaymentIntakeService paymentIntakeService = new PaymentIntakeService(idempotencyStore, ledgerStore, clock);
+
 
     @Test
     void firstPaymentCreatesBalancedLedgerEntries() {

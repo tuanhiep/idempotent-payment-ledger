@@ -5,6 +5,8 @@ import infra.systemdesign.paymentledger.domain.InsufficientFundsException;
 import infra.systemdesign.paymentledger.domain.LedgerEntry;
 import infra.systemdesign.paymentledger.domain.LedgerEntryType;
 import infra.systemdesign.paymentledger.domain.PaymentRequest;
+import infra.systemdesign.paymentledger.application.port.IdempotencyStore;
+import infra.systemdesign.paymentledger.domain.PaymentResponse;
 import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
@@ -25,9 +27,11 @@ public class InMemoryLedgerStore implements LedgerStore {
     private final List<LedgerEntry> entries = new ArrayList<>();
     private final Map<String, BigDecimal> balances = new HashMap<>();
     private final Lock lock = new ReentrantLock();
+    private final IdempotencyStore idempotencyStore;
     private final Clock clock;
 
-    public InMemoryLedgerStore(Clock clock) {
+    public InMemoryLedgerStore(IdempotencyStore idempotencyStore, Clock clock) {
+        this.idempotencyStore = idempotencyStore;
         this.clock = clock;
         // Khởi tạo sẵn tài khoản test cho local tests
         balances.put("acct-payer", new BigDecimal("1000.0000"));
@@ -35,6 +39,7 @@ public class InMemoryLedgerStore implements LedgerStore {
         balances.put("acct-payer-http", new BigDecimal("1000.0000"));
         balances.put("acct-merchant-http", BigDecimal.ZERO);
     }
+
 
     public LedgerWriteResult recordPayment(String idempotencyKey, PaymentRequest request) {
         lock.lock();
@@ -118,4 +123,27 @@ public class InMemoryLedgerStore implements LedgerStore {
             lock.unlock();
         }
     }
+
+    @Override
+    public PaymentResponse recordPaymentAndComplete(
+            String idempotencyKey,
+            PaymentRequest request,
+            IdempotencyStore.NewReservation reservation) {
+        
+        LedgerWriteResult ledgerWrite = recordPayment(idempotencyKey, request);
+        
+        PaymentResponse response = new PaymentResponse(
+                ledgerWrite.paymentId(),
+                ledgerWrite.ledgerTransactionId(),
+                "ACCEPTED",
+                request.amount(),
+                request.currency(),
+                false,
+                clock.instant()
+        );
+        
+        idempotencyStore.complete(reservation, response);
+        return response;
+    }
 }
+

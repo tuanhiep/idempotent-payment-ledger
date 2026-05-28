@@ -12,7 +12,7 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.util.HexFormat;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
+
 
 @Service
 public class PaymentIntakeService {
@@ -27,7 +27,6 @@ public class PaymentIntakeService {
         this.clock = clock;
     }
 
-    @Transactional
     public PaymentResponse process(String idempotencyKey, PaymentRequest request) {
         String normalizedKey = normalizeKey(idempotencyKey);
         PaymentRequest canonicalRequest = request.canonical();
@@ -40,23 +39,13 @@ public class PaymentIntakeService {
 
         IdempotencyStore.NewReservation newReservation = (IdempotencyStore.NewReservation) reservation;
         try {
-            LedgerWriteResult ledgerWrite = ledgerStore.recordPayment(normalizedKey, canonicalRequest);
-            PaymentResponse response = new PaymentResponse(
-                    ledgerWrite.paymentId(),
-                    ledgerWrite.ledgerTransactionId(),
-                    "ACCEPTED",
-                    canonicalRequest.amount(),
-                    canonicalRequest.currency(),
-                    false,
-                    clock.instant()
-            );
-            idempotencyStore.complete(newReservation, response);
-            return response;
+            return ledgerStore.recordPaymentAndComplete(normalizedKey, canonicalRequest, newReservation);
         } catch (RuntimeException exception) {
             idempotencyStore.fail(newReservation, exception);
             throw exception;
         }
     }
+
 
     private static String normalizeKey(String idempotencyKey) {
         if (idempotencyKey == null || idempotencyKey.isBlank()) {

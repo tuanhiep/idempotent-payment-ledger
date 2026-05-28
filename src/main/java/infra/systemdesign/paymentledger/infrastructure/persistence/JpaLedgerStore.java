@@ -17,6 +17,8 @@ import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import infra.systemdesign.paymentledger.application.port.IdempotencyStore;
+import infra.systemdesign.paymentledger.domain.PaymentResponse;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.context.annotation.Profile;
@@ -26,12 +28,6 @@ import org.springframework.transaction.annotation.Transactional;
 
 /**
  * Durable ledger store backed by a relational database.
- *
- * <p>{@code recordPayment()} participates in the outer {@code @Transactional} started by
- * {@code PaymentIntakeService.process()} (propagation = REQUIRED). This means the payment
- * row, ledger transaction, and both ledger entries commit atomically with the
- * idempotency ACCEPTED update — satisfying the double-entry balance invariant
- * even under crash scenarios.
  *
  * <p>Active only when the {@code jpa} Spring profile is set.
  */
@@ -47,6 +43,7 @@ public class JpaLedgerStore implements LedgerStore {
     private final LedgerTransactionJpaRepository ledgerTransactionRepository;
     private final LedgerEntryJpaRepository ledgerEntryRepository;
     private final AccountJpaRepository accountRepository;
+    private final IdempotencyStore idempotencyStore;
     private final Clock clock;
 
     public JpaLedgerStore(
@@ -54,13 +51,16 @@ public class JpaLedgerStore implements LedgerStore {
             LedgerTransactionJpaRepository ledgerTransactionRepository,
             LedgerEntryJpaRepository ledgerEntryRepository,
             AccountJpaRepository accountRepository,
+            IdempotencyStore idempotencyStore,
             Clock clock) {
         this.paymentRepository = paymentRepository;
         this.ledgerTransactionRepository = ledgerTransactionRepository;
         this.ledgerEntryRepository = ledgerEntryRepository;
         this.accountRepository = accountRepository;
+        this.idempotencyStore = idempotencyStore;
         this.clock = clock;
     }
+
 
     /**
      * Records the payment, ledger transaction, and two balanced ledger entries.
@@ -182,6 +182,29 @@ public class JpaLedgerStore implements LedgerStore {
                 .orElse(BigDecimal.ZERO);
     }
 
+    @Override
+    @Transactional(propagation = Propagation.REQUIRED)
+    public PaymentResponse recordPaymentAndComplete(
+            String idempotencyKey,
+            PaymentRequest request,
+            IdempotencyStore.NewReservation reservation) {
+        
+        LedgerWriteResult ledgerWrite = recordPayment(idempotencyKey, request);
+        
+        PaymentResponse response = new PaymentResponse(
+                ledgerWrite.paymentId(),
+                ledgerWrite.ledgerTransactionId(),
+                "ACCEPTED",
+                request.amount(),
+                request.currency(),
+                false,
+                clock.instant()
+        );
+        
+        idempotencyStore.complete(reservation, response);
+        return response;
+    }
+
     private LedgerEntry toDomain(LedgerEntryEntity entity) {
         return new LedgerEntry(
                 entity.getEntryId(),
@@ -194,3 +217,4 @@ public class JpaLedgerStore implements LedgerStore {
         );
     }
 }
+
