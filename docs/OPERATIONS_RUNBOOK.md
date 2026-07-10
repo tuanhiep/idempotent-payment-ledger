@@ -71,7 +71,8 @@ If a Spring Boot container crashes abruptly *after* reserving a key in Redis but
 *   **Manual Intervention (Emergency Force-Unlock)**:
     If a P0 merchant transaction is blocked and cannot wait 120 seconds:
     1.  Connect to the Redis instance: `redis-cli`.
-    2.  Locate the stuck key: `KEYS idempotency:*`.
+    2.  Locate the stuck key safely using `SCAN` to avoid blocking production: 
+        `SCAN 0 MATCH idempotency:* COUNT 1000`
     3.  Delete the key: `DEL idempotency:<stuck_key>`.
     4.  Ask the client to retry immediately.
 
@@ -107,16 +108,28 @@ HAVING SUM(CASE WHEN entry_type = 'CREDIT' THEN amount ELSE -amount END) != 0.00
 
 ### 2. Database Balance vs Ledger Entry Audit
 
-Verify that the stored account balance matches the sum of its credit and debit ledger entries.
+Verify that the stored account balance matches the sum of its credit and debit ledger entries, taking into account the initial seeded balances for test accounts (1000.00 for `acct-payer` and `acct-payer-http`).
 ```sql
 SELECT 
     a.account_id,
     a.balance AS current_stored_balance,
-    COALESCE(SUM(CASE WHEN le.entry_type = 'CREDIT' THEN le.amount ELSE -le.amount END), 0.00) AS calculated_ledger_balance
+    (
+        CASE 
+            WHEN a.account_id IN ('acct-payer', 'acct-payer-http') THEN 1000.0000 
+            ELSE 0.0000 
+        END
+        + COALESCE(SUM(CASE WHEN le.entry_type = 'CREDIT' THEN le.amount ELSE -le.amount END), 0.0000)
+    ) AS calculated_ledger_balance
 FROM accounts a
 LEFT JOIN ledger_entries le ON a.account_id = le.account_id
 GROUP BY a.account_id, a.balance
-HAVING a.balance != COALESCE(SUM(CASE WHEN le.entry_type = 'CREDIT' THEN le.amount ELSE -le.amount END), 0.00);
+HAVING a.balance != (
+    CASE 
+        WHEN a.account_id IN ('acct-payer', 'acct-payer-http') THEN 1000.0000 
+        ELSE 0.0000 
+    END
+    + COALESCE(SUM(CASE WHEN le.entry_type = 'CREDIT' THEN le.amount ELSE -le.amount END), 0.0000)
+);
 ```
 *   **Expected Result**: Empty set.
 *   **Action if Triggered**: Out-of-band balance reconciliation is required. Freeze the affected account and verify if manual balance correction is needed.

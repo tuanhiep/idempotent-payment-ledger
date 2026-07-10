@@ -52,6 +52,9 @@ public class PaymentIntakeService {
                 PaymentResponse response = ledgerStore.recordPaymentAndComplete(normalizedKey, canonicalRequest, newReservation);
                 incrementMetric("accepted");
                 return response;
+            } catch (DuplicateIdempotencyKeyException | PaymentInProgressException exception) {
+                idempotencyStore.fail(newReservation, exception);
+                throw exception;
             } catch (RuntimeException exception) {
                 idempotencyStore.fail(newReservation, exception);
                 incrementMetric("failed");
