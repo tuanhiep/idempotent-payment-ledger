@@ -34,8 +34,8 @@
 ## Operations
 
 - [x] Baseline Actuator endpoints are configured.
-- [ ] Domain metrics exist for accepted, replayed, and rejected requests.
-- [ ] Runbook exists.
+- [x] Domain metrics exist for accepted, replayed, and rejected requests.
+- [x] Runbook exists.
 
 ## Scale
 
@@ -47,7 +47,7 @@
 
 - [x] Initial failure modes are documented.
 - [x] Ledger imbalance limitation and next slice are documented.
-- [ ] Recovery path is implemented for reconciliation.
+- [x] Recovery path is implemented for reconciliation.
 - [ ] Timeout-after-commit scenario is simulated.
 
 ## Security

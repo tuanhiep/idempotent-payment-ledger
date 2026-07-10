@@ -1,6 +1,7 @@
 package infra.systemdesign.paymentledger.infrastructure.persistence;
 
 import infra.systemdesign.paymentledger.application.port.LedgerStore;
+import infra.systemdesign.paymentledger.domain.DuplicateIdempotencyKeyException;
 import infra.systemdesign.paymentledger.domain.InsufficientFundsException;
 import infra.systemdesign.paymentledger.domain.LedgerEntry;
 import infra.systemdesign.paymentledger.domain.LedgerEntryType;
@@ -25,6 +26,8 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * Durable ledger store backed by a relational database.
@@ -189,6 +192,36 @@ public class JpaLedgerStore implements LedgerStore {
             PaymentRequest request,
             IdempotencyStore.NewReservation reservation) {
         
+        java.util.Optional<PaymentEntity> existingOpt = paymentRepository.findByTenantIdAndIdempotencyKey(TENANT_ID, idempotencyKey);
+        if (existingOpt.isPresent()) {
+            PaymentEntity existing = existingOpt.get();
+            // Validate payload consistency
+            if (!existing.getPayerAccountId().equals(request.payerAccountId())
+                    || !existing.getMerchantAccountId().equals(request.merchantAccountId())
+                    || existing.getAmount().compareTo(request.amount()) != 0
+                    || !existing.getCurrency().equals(request.currency())) {
+                throw new DuplicateIdempotencyKeyException(
+                        "idempotency key already exists for a different payment payload");
+            }
+            
+            LedgerTransactionEntity tx = ledgerTransactionRepository.findByPaymentId(existing.getPaymentId())
+                    .orElseThrow(() -> new IllegalStateException("ledger transaction not found for payment: " + existing.getPaymentId()));
+            
+            PaymentResponse response = new PaymentResponse(
+                    existing.getPaymentId(),
+                    tx.getTransactionId(),
+                    existing.getStatus(),
+                    existing.getAmount(),
+                    existing.getCurrency(),
+                    true, // replayed
+                    existing.getCreatedAt().toInstant()
+            );
+            
+            // Rebuild the cache (Redis/InMemory). Since we are not modifying DB, complete immediately
+            idempotencyStore.complete(reservation, response);
+            return response;
+        }
+
         LedgerWriteResult ledgerWrite = recordPayment(idempotencyKey, request);
         
         PaymentResponse response = new PaymentResponse(
@@ -201,7 +234,16 @@ public class JpaLedgerStore implements LedgerStore {
                 clock.instant()
         );
         
-        idempotencyStore.complete(reservation, response);
+        if (TransactionSynchronizationManager.isActualTransactionActive() && idempotencyStore.requiresAfterCommitCompletion()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    idempotencyStore.complete(reservation, response);
+                }
+            });
+        } else {
+            idempotencyStore.complete(reservation, response);
+        }
         return response;
     }
 

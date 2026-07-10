@@ -18,6 +18,8 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.IntStream;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 
 class PaymentIntakeServiceTest {
@@ -25,7 +27,9 @@ class PaymentIntakeServiceTest {
     private final Clock clock = Clock.fixed(Instant.parse("2026-05-14T09:00:00Z"), ZoneOffset.UTC);
     private final IdempotencyStore idempotencyStore = new InMemoryIdempotencyStore();
     private final InMemoryLedgerStore ledgerStore = new InMemoryLedgerStore(idempotencyStore, clock);
-    private final PaymentIntakeService paymentIntakeService = new PaymentIntakeService(idempotencyStore, ledgerStore, clock);
+    private final MeterRegistry meterRegistry = new SimpleMeterRegistry();
+    private final PaymentIntakeService paymentIntakeService = new PaymentIntakeService(
+            idempotencyStore, ledgerStore, clock, meterRegistry);
 
 
     @Test
@@ -37,6 +41,10 @@ class PaymentIntakeServiceTest {
         assertThat(ledgerStore.entriesForTransaction(response.ledgerTransactionId())).hasSize(2);
         assertThat(ledgerStore.balanceForTransaction(response.ledgerTransactionId()))
                 .isEqualByComparingTo(BigDecimal.ZERO);
+
+        // Verify accepted metric
+        assertThat(meterRegistry.counter("payment.intake.requests", "status", "accepted").count())
+                .isEqualTo(1.0);
     }
 
     @Test
@@ -48,6 +56,12 @@ class PaymentIntakeServiceTest {
         assertThat(replay.paymentId()).isEqualTo(first.paymentId());
         assertThat(replay.ledgerTransactionId()).isEqualTo(first.ledgerTransactionId());
         assertThat(ledgerStore.entryCount()).isEqualTo(2);
+
+        // Verify metrics
+        assertThat(meterRegistry.counter("payment.intake.requests", "status", "accepted").count())
+                .isEqualTo(1.0);
+        assertThat(meterRegistry.counter("payment.intake.requests", "status", "replayed").count())
+                .isEqualTo(1.0);
     }
 
     @Test
@@ -102,6 +116,12 @@ class PaymentIntakeServiceTest {
                 .isInstanceOf(DuplicateIdempotencyKeyException.class)
                 .hasMessageContaining("different payment payload");
         assertThat(ledgerStore.entryCount()).isEqualTo(2);
+
+        // Verify metrics
+        assertThat(meterRegistry.counter("payment.intake.requests", "status", "accepted").count())
+                .isEqualTo(1.0);
+        assertThat(meterRegistry.counter("payment.intake.requests", "status", "conflict").count())
+                .isEqualTo(1.0);
     }
 
     @Test
@@ -157,6 +177,33 @@ class PaymentIntakeServiceTest {
                 .isInstanceOf(infra.systemdesign.paymentledger.domain.InsufficientFundsException.class)
                 .hasMessageContaining("insufficient funds");
         assertThat(ledgerStore.entryCount()).isZero();
+
+        // Verify metrics
+        assertThat(meterRegistry.counter("payment.intake.requests", "status", "failed").count())
+                .isEqualTo(1.0);
+    }
+
+    @Test
+    void paymentInProgressThrowsPaymentInProgressExceptionAndIncrementsEarlyMetric() {
+        IdempotencyStore mockStore = new IdempotencyStore() {
+            @Override
+            public Reservation reserve(String key, String payloadHash) {
+                throw new infra.systemdesign.paymentledger.domain.PaymentInProgressException("in progress");
+            }
+            @Override
+            public void complete(NewReservation reservation, PaymentResponse response) {}
+            @Override
+            public void fail(NewReservation reservation, RuntimeException failure) {}
+        };
+        MeterRegistry localRegistry = new SimpleMeterRegistry();
+        PaymentIntakeService serviceWithMock = new PaymentIntakeService(
+                mockStore, ledgerStore, clock, localRegistry);
+
+        assertThatThrownBy(() -> serviceWithMock.process("pay-inprogress", request("50.00")))
+                .isInstanceOf(infra.systemdesign.paymentledger.domain.PaymentInProgressException.class);
+
+        assertThat(localRegistry.counter("payment.intake.requests", "status", "early").count())
+                .isEqualTo(1.0);
     }
 
     private static PaymentRequest request(String amount) {

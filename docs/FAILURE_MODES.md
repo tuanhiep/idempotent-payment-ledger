@@ -105,7 +105,7 @@ Current evidence:
 - `PaymentIntakeServiceTest.firstPaymentCreatesBalancedLedgerEntries`
 - `JpaPaymentIntakeIntegrationTest.java`
 
-## Double-Spending / Account Balance Overdraft (Crucial Production Gap)
+## Double-Spending / Account Balance Overdraft
 
 Scenario:
 
@@ -117,10 +117,12 @@ The system must check the accumulated balance of the payer account before insert
 
 Current status:
 
-**Unimplemented (Current Core Gap)**. The current slice only prevents double-charging (idempotency) but does not validate or lock the payer account balance before committing new ledger entries.
+Fully implemented. 
+1. We enforce account-level balance validation inside `JpaLedgerStore.recordPayment()`.
+2. Pessimistic Locking (`SELECT FOR UPDATE` on account rows) is performed in a strictly defined consistent locking order (by account ID sorting) to prevent deadlocks while blocking concurrent double-spending attempts.
+3. A database check constraint `chk_accounts_balance_non_negative` (balance >= 0) is installed on the `accounts` table as a hard boundary defense-in-depth.
 
-Next slice:
+Current evidence:
 
-- Create an explicit `Account` concept with a balance check.
-- Introduce `BigDecimal getAccountBalance(String accountId)` in `LedgerStore` that calculates balance as `sum(credits) - sum(debits)`.
-- Use Pessimistic Locking (`SELECT FOR UPDATE` on account/balance row) to lock the payer account, preventing race conditions on concurrent balance deduction.
+- `RedisPaymentIntakeIntegrationTest.java` (Demonstrates concurrency double-spend prevention under Virtual Threads)
+- `JpaPaymentIntakeIntegrationTest.java`

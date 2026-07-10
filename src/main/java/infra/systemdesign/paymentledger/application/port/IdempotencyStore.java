@@ -11,6 +11,17 @@ public interface IdempotencyStore {
 
     void fail(NewReservation reservation, RuntimeException failure);
 
+    /**
+     * Indicates if completing a reservation requires deferring until the active
+     * database transaction is committed (e.g. for non-durable external cache stores like Redis).
+     *
+     * @return true if completion should run after database commit, false if it should run
+     * inside the database transaction.
+     */
+    default boolean requiresAfterCommitCompletion() {
+        return true;
+    }
+
     sealed interface Reservation permits NewReservation, ExistingReservation {}
 
     record NewReservation(String key, String payloadHash) implements Reservation {}

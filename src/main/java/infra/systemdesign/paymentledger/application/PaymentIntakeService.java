@@ -2,16 +2,18 @@ package infra.systemdesign.paymentledger.application;
 
 import infra.systemdesign.paymentledger.application.port.IdempotencyStore;
 import infra.systemdesign.paymentledger.application.port.LedgerStore;
-import infra.systemdesign.paymentledger.application.port.LedgerStore.LedgerWriteResult;
 import infra.systemdesign.paymentledger.domain.DuplicateIdempotencyKeyException;
+import infra.systemdesign.paymentledger.domain.PaymentInProgressException;
 import infra.systemdesign.paymentledger.domain.PaymentRequest;
 import infra.systemdesign.paymentledger.domain.PaymentResponse;
+import io.micrometer.core.instrument.MeterRegistry;
+import org.springframework.stereotype.Service;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.util.HexFormat;
-import org.springframework.stereotype.Service;
 
 
 @Service
@@ -20,11 +22,17 @@ public class PaymentIntakeService {
     private final IdempotencyStore idempotencyStore;
     private final LedgerStore ledgerStore;
     private final Clock clock;
+    private final MeterRegistry meterRegistry;
 
-    public PaymentIntakeService(IdempotencyStore idempotencyStore, LedgerStore ledgerStore, Clock clock) {
+    public PaymentIntakeService(
+            IdempotencyStore idempotencyStore,
+            LedgerStore ledgerStore,
+            Clock clock,
+            MeterRegistry meterRegistry) {
         this.idempotencyStore = idempotencyStore;
         this.ledgerStore = ledgerStore;
         this.clock = clock;
+        this.meterRegistry = meterRegistry;
     }
 
     public PaymentResponse process(String idempotencyKey, PaymentRequest request) {
@@ -32,17 +40,35 @@ public class PaymentIntakeService {
         PaymentRequest canonicalRequest = request.canonical();
         String payloadHash = sha256(canonicalRequest.payloadFingerprint());
 
-        IdempotencyStore.Reservation reservation = idempotencyStore.reserve(normalizedKey, payloadHash);
-        if (reservation instanceof IdempotencyStore.ExistingReservation existing) {
-            return existing.record().replay();
-        }
-
-        IdempotencyStore.NewReservation newReservation = (IdempotencyStore.NewReservation) reservation;
         try {
-            return ledgerStore.recordPaymentAndComplete(normalizedKey, canonicalRequest, newReservation);
-        } catch (RuntimeException exception) {
-            idempotencyStore.fail(newReservation, exception);
+            IdempotencyStore.Reservation reservation = idempotencyStore.reserve(normalizedKey, payloadHash);
+            if (reservation instanceof IdempotencyStore.ExistingReservation existing) {
+                incrementMetric("replayed");
+                return existing.record().replay();
+            }
+
+            IdempotencyStore.NewReservation newReservation = (IdempotencyStore.NewReservation) reservation;
+            try {
+                PaymentResponse response = ledgerStore.recordPaymentAndComplete(normalizedKey, canonicalRequest, newReservation);
+                incrementMetric("accepted");
+                return response;
+            } catch (RuntimeException exception) {
+                idempotencyStore.fail(newReservation, exception);
+                incrementMetric("failed");
+                throw exception;
+            }
+        } catch (DuplicateIdempotencyKeyException exception) {
+            incrementMetric("conflict");
             throw exception;
+        } catch (PaymentInProgressException exception) {
+            incrementMetric("early");
+            throw exception;
+        }
+    }
+
+    private void incrementMetric(String status) {
+        if (meterRegistry != null) {
+            meterRegistry.counter("payment.intake.requests", "status", status).increment();
         }
     }
 

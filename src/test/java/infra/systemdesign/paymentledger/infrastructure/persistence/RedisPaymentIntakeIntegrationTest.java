@@ -91,8 +91,8 @@ class RedisPaymentIntakeIntegrationTest extends PostgresIntegrationTestSupport {
     void duplicateSamePayloadReturnsReplayDirectlyFromRedis() {
         PaymentResponse first = paymentIntakeService.process("redis-002", request("150.00"));
         
-        // Let's truncate the DB tables entirely to prove that the replay is served
-        // 100% from Redis WITHOUT hitting the DB ledger stores at all!
+        // Verify that the replay is served directly from the Redis cache lookup.
+        // Since Redis has the ACCEPTED record, the database ledger store is not reached.
         Objects.requireNonNull(redisTemplate.getConnectionFactory());
         
         PaymentResponse replay = paymentIntakeService.process("redis-002", request("150.00"));

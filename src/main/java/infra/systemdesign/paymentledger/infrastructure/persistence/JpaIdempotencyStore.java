@@ -130,6 +130,11 @@ public class JpaIdempotencyStore implements IdempotencyStore {
                 repository.deleteByTenantIdAndIdempotencyKey(TENANT_ID, reservation.key()));
     }
 
+    @Override
+    public boolean requiresAfterCommitCompletion() {
+        return false;
+    }
+
     // -------------------------------------------------------------------------
     // Private helpers
     // -------------------------------------------------------------------------
