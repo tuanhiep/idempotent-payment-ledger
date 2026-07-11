@@ -19,7 +19,7 @@ This document outlines the key architectural decisions, design trade-offs, and p
 ## 2. Concurrency Control & Database-Level Defense-in-Depth
 
 ### 2.1. Uniqueness Guarantee (V3 Migration)
-To guarantee absolute data integrity under concurrent attempts, a database-level unique constraint `uq_payments_key UNIQUE (tenant_id, idempotency_key)` is enforced on the `payments` table. This serves as the ultimate safety net if the distributed cache layer (Redis) fails or experiences key eviction.
+To enforce transaction consistency under concurrent attempts, a database-level unique constraint `uq_payments_key UNIQUE (tenant_id, idempotency_key)` is enforced on the `payments` table. This serves as the safety net if the distributed cache layer (Redis) fails or experiences key eviction.
 
 ### 2.2. Concurrency Race Recovery (Look-and-Replay)
 When concurrent requests with the same idempotency key bypass the cache layer (e.g., during lock thrashing or cache eviction) and execute the write path simultaneously:
@@ -46,4 +46,4 @@ If the database transaction commits successfully but the subsequent cache comple
 Applying the V3 unique constraint to an existing production database with historical transaction data requires pre-flight audits to identify and resolve any duplicate keys. Refer to the [Operations Runbook](OPERATIONS_RUNBOOK.md) for details on pre-migration cleanup queries.
 
 ### 4.2. Load Testing & Capacity Estimation
-While the core concurrency invariants are mathematically verified, future work should include running synthetic load simulations (e.g., 5,000+ concurrent requests) to benchmark Redis lock performance and compute production RAM allocation requirements based on anticipated throughput.
+While the core concurrency invariants are functionally verified under concurrent thread simulations, future work should include running synthetic load simulations (e.g., 5,000+ concurrent requests) to benchmark Redis lock performance and compute production RAM allocation requirements based on anticipated throughput.

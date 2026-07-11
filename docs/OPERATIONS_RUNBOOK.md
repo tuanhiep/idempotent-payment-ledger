@@ -15,7 +15,7 @@ The system runs on a hybrid database architecture:
 
 ### 1. PostgreSQL Database Outage (P0)
 
-*   **Symptoms**: 
+*   **Symptoms**:
     *   API returns HTTP `500 Internal Server Error` with `CannotGetJdbcConnectionException` or `HikariPool-1 - Connection is not available`.
     *   Micrometer metric `payment.intake.requests{status="failed"}` spikes.
 *   **Impact**: Core payment intake is entirely blocked. The application cannot write payments or mutate ledger balances.
@@ -23,8 +23,8 @@ The system runs on a hybrid database architecture:
     1.  Verify DB container/host status: `docker ps` or verify AWS RDS instance status.
     2.  If connection pool exhaustion is suspected, inspect active connections:
         ```sql
-        SELECT pid, age(clock_timestamp(), query_start), usename, state, query 
-        FROM pg_stat_activity 
+        SELECT pid, age(clock_timestamp(), query_start), usename, state, query
+        FROM pg_stat_activity
         WHERE state != 'idle' AND query NOT LIKE '%pg_stat_activity%';
         ```
     3.  Restart database or scale connection pool size if required by adjusting `spring.datasource.hikari.maximum-pool-size` configuration.
@@ -32,7 +32,7 @@ The system runs on a hybrid database architecture:
 
 ### 2. Redis Cluster Outage / Cache Eviction (P1)
 
-*   **Symptoms**: 
+*   **Symptoms**:
     *   API returns HTTP `500` or fails to connect to Redis (`RedisConnectionFailureException`).
     *   Prometheus alert triggers for Redis memory exhaustion or service down.
 *   **Impact**: External boundary locking is disabled. Concurrency race protection falls back entirely to PostgreSQL unique constraints.
@@ -71,7 +71,7 @@ If a Spring Boot container crashes abruptly *after* reserving a key in Redis but
 *   **Manual Intervention (Emergency Force-Unlock)**:
     If a P0 merchant transaction is blocked and cannot wait 120 seconds:
     1.  Connect to the Redis instance: `redis-cli`.
-    2.  Locate the stuck key safely using `SCAN` to avoid blocking production: 
+    2.  Locate the stuck key safely using `SCAN` to avoid blocking production:
         `SCAN 0 MATCH idempotency:* COUNT 1000`
     3.  Delete the key: `DEL idempotency:<stuck_key>`.
     4.  Ask the client to retry immediately.
@@ -82,8 +82,8 @@ If a Spring Boot container crashes abruptly *after* reserving a key in Redis but
 *   **Cause**: The client reused an existing key but changed parameters (e.g. payer, amount, currency), which is an API violation.
 *   **Action**: Trace client request parameters in logs. Inspect database payments to see what was originally recorded:
     ```sql
-    SELECT payment_id, payer_account_id, merchant_account_id, amount, currency, status 
-    FROM payments 
+    SELECT payment_id, payer_account_id, merchant_account_id, amount, currency, status
+    FROM payments
     WHERE idempotency_key = 'offending-key';
     ```
     Confirm that the client needs to generate a fresh, unique `Idempotency-Key` for the new transaction.
@@ -110,13 +110,13 @@ HAVING SUM(CASE WHEN entry_type = 'CREDIT' THEN amount ELSE -amount END) != 0.00
 
 Verify that the stored account balance matches the sum of its credit and debit ledger entries, taking into account the initial seeded balances for test accounts (1000.00 for `acct-payer` and `acct-payer-http`).
 ```sql
-SELECT 
+SELECT
     a.account_id,
     a.balance AS current_stored_balance,
     (
-        CASE 
-            WHEN a.account_id IN ('acct-payer', 'acct-payer-http') THEN 1000.0000 
-            ELSE 0.0000 
+        CASE
+            WHEN a.account_id IN ('acct-payer', 'acct-payer-http') THEN 1000.0000
+            ELSE 0.0000
         END
         + COALESCE(SUM(CASE WHEN le.entry_type = 'CREDIT' THEN le.amount ELSE -le.amount END), 0.0000)
     ) AS calculated_ledger_balance
@@ -124,9 +124,9 @@ FROM accounts a
 LEFT JOIN ledger_entries le ON a.account_id = le.account_id
 GROUP BY a.account_id, a.balance
 HAVING a.balance != (
-    CASE 
-        WHEN a.account_id IN ('acct-payer', 'acct-payer-http') THEN 1000.0000 
-        ELSE 0.0000 
+    CASE
+        WHEN a.account_id IN ('acct-payer', 'acct-payer-http') THEN 1000.0000
+        ELSE 0.0000
     END
     + COALESCE(SUM(CASE WHEN le.entry_type = 'CREDIT' THEN le.amount ELSE -le.amount END), 0.0000)
 );
@@ -150,15 +150,17 @@ Before executing the **V3 unique constraint migration** (`V3__add_unique_constra
     GROUP BY tenant_id, idempotency_key
     HAVING COUNT(*) > 1;
     ```
-2.  **Mitigation / Deduplication Action**:
-    If duplicate payments are found, the Flyway migration will fail. You must deduplicate or rename the conflicting keys out-of-band before deploying the V3 application code:
-    ```sql
-    -- Example deduplication script (keeps the oldest payment row per tenant/key)
-    DELETE FROM payments a
-    WHERE a.ctid <> (
-        SELECT min(b.ctid)
-        FROM payments b
-        WHERE a.tenant_id = b.tenant_id 
-          AND a.idempotency_key = b.idempotency_key
-    );
-    ```
+2.  **Mitigation & Incident Response Protocol**:
+    If duplicate combinations are detected, applying the `V3` unique constraint will fail, halting the release pipeline. **DO NOT attempt to delete transaction history directly from the database.** Deleting historical rows will violate audit logs and database foreign key integrity (e.g., from ledger entries).
+
+    Instead, execute the following Incident Response protocol:
+    - **Halt Rollout**: Immediately abort the database migration and notify the on-call and release manager teams.
+    - **Analyze & Locate Winner**: Identify the duplicate entries and determine which database row is the canonical payment (e.g., matching the success status returned to the customer or payment gateway).
+    - **Rekey Conflicting Entries**: For the duplicates that are non-canonical, update the `idempotency_key` column to append a suffix (e.g., `_duplicate_v3_migration_incident_<incident_id>`). This preserves audit logs, honors foreign keys, and satisfies the physical uniqueness constraint:
+      ```sql
+      -- Example suffix rekeying query (safe; preserves historical data for audits)
+      UPDATE payments
+      SET idempotency_key = idempotency_key || '_dup_incident_12345'
+      WHERE payment_id = '<non_canonical_payment_id>';
+      ```
+    - **Audit & Reconcile**: Verify that the associated ledger transactions and entries remain balanced. Execute compensating accounting entries if any discrepancy is found.

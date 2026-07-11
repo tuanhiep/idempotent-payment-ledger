@@ -178,7 +178,7 @@ public class JpaLedgerStore implements LedgerStore {
     @Override
     @Transactional(propagation = Propagation.REQUIRED, readOnly = true)
     public BigDecimal getAccountBalance(String accountId) {
-        return accountRepository.findReadOnlyByTenantIdAndAccountId(TENANT_ID, accountId)
+        return accountRepository.findAccountByTenantIdAndAccountId(TENANT_ID, accountId)
                 .map(AccountEntity::getBalance)
                 .orElse(BigDecimal.ZERO);
     }

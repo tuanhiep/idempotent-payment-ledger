@@ -29,7 +29,7 @@ class PaymentIntakeServiceTest {
     private final InMemoryLedgerStore ledgerStore = new InMemoryLedgerStore(idempotencyStore, clock);
     private final MeterRegistry meterRegistry = new SimpleMeterRegistry();
     private final PaymentIntakeService paymentIntakeService = new PaymentIntakeService(
-            idempotencyStore, ledgerStore, clock, meterRegistry);
+            idempotencyStore, ledgerStore, meterRegistry);
 
 
     @Test
@@ -197,7 +197,7 @@ class PaymentIntakeServiceTest {
         };
         MeterRegistry localRegistry = new SimpleMeterRegistry();
         PaymentIntakeService serviceWithMock = new PaymentIntakeService(
-                mockStore, ledgerStore, clock, localRegistry);
+                mockStore, ledgerStore, localRegistry);
 
         assertThatThrownBy(() -> serviceWithMock.process("pay-inprogress", request("50.00")))
                 .isInstanceOf(infra.systemdesign.paymentledger.domain.PaymentInProgressException.class);

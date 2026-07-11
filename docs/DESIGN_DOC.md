@@ -62,14 +62,14 @@ This module uses a pragmatic ports-and-adapters layout. The payment intake use c
 flowchart TD
     client[Client] --> api[PaymentController]
     api --> service[PaymentIntakeService]
-    service --> idem[IdempotencyStore]
-    idem -->|existing same payload| replay[Replay stored response]
-    idem -->|existing different payload| conflict[409 Conflict]
-    idem -->|new reservation| ledger[LedgerStore]
-    ledger --> infra[InMemoryLedgerStore]
-    infra --> debit[Debit payer account]
-    infra --> credit[Credit merchant account]
-    credit --> complete[Complete idempotency reservation]
+    service --> lock[IdempotencyStore / Redis Lock]
+    lock -->|existing same payload| replay[Replay stored response]
+    lock -->|existing different payload| conflict[409 Conflict]
+    lock -->|new reservation| ledger[LedgerStore]
+    ledger --> jpa[JpaLedgerStore / PostgreSQL]
+    jpa --> debit[Debit payer account]
+    jpa --> credit[Credit merchant account]
+    credit --> complete[Complete idempotency reservation / Redis Unlock]
     complete --> response[Return accepted response]
 ```
 

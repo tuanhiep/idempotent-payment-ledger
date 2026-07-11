@@ -9,14 +9,23 @@ import infra.systemdesign.paymentledger.domain.InsufficientFundsException;
 import infra.systemdesign.paymentledger.domain.LedgerEntry;
 import infra.systemdesign.paymentledger.domain.PaymentRequest;
 import infra.systemdesign.paymentledger.domain.PaymentResponse;
+import infra.systemdesign.paymentledger.application.port.IdempotencyStore;
+import infra.systemdesign.paymentledger.infrastructure.persistence.entity.IdempotencyRecordEntity;
+import infra.systemdesign.paymentledger.infrastructure.persistence.repository.IdempotencyRecordJpaRepository;
 import infra.systemdesign.paymentledger.infrastructure.persistence.repository.LedgerEntryJpaRepository;
+import infra.systemdesign.paymentledger.infrastructure.persistence.repository.PaymentJpaRepository;
 import infra.systemdesign.paymentledger.support.PostgresIntegrationTestSupport;
+import io.micrometer.core.instrument.MeterRegistry;
 import java.math.BigDecimal;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
 import java.util.List;
+import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -51,6 +60,15 @@ class JpaPaymentIntakeIntegrationTest extends PostgresIntegrationTestSupport {
 
     @Autowired
     private LedgerEntryJpaRepository ledgerEntryRepository;
+
+    @Autowired
+    private PaymentJpaRepository paymentRepository;
+
+    @Autowired
+    private IdempotencyRecordJpaRepository idempotencyRecordRepository;
+
+    @Autowired
+    private MeterRegistry meterRegistry;
 
     @Test
     void firstPaymentPersistsBalancedLedgerEntries() {
@@ -183,6 +201,107 @@ class JpaPaymentIntakeIntegrationTest extends PostgresIntegrationTestSupport {
 
             // Total ledger entry count is exactly 10 (5 Debit entries + 5 Credit entries)
             assertThat(ledgerEntryRepository.count()).isEqualTo(10);
+        }
+    }
+
+    @Test
+    void whenConcurrentDbWritersRace_thenOnlyOnePaymentCreatedAndLoserReceivesSuccessfulReplay() throws InterruptedException {
+        String key = "concurrent-db-race-001";
+        PaymentRequest request = request("100.00");
+        String payloadHash = sha256(request.payloadFingerprint());
+
+        // Pre-insert the PROCESSING record so the winner thread can complete it successfully
+        OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
+        IdempotencyRecordEntity entity = new IdempotencyRecordEntity(
+                "default",
+                key,
+                payloadHash,
+                payloadHash,
+                "PROCESSING",
+                now,
+                now.plusDays(7)
+        );
+        idempotencyRecordRepository.saveAndFlush(entity);
+
+        // Stub an IdempotencyStore that bypasses lock checks and returns NewReservation to both threads
+        IdempotencyStore mockStore = new IdempotencyStore() {
+            @Override
+            public Reservation reserve(String key, String payloadHash) {
+                return new NewReservation(key, payloadHash);
+            }
+
+            @Override
+            public void complete(NewReservation reservation, PaymentResponse response) {}
+
+            @Override
+            public void fail(NewReservation reservation, RuntimeException failure) {}
+        };
+
+        // Create service using real JpaLedgerStore and real MeterRegistry but our mocked idempotency store
+        PaymentIntakeService raceTestService = new PaymentIntakeService(
+                mockStore, jpaLedgerStore, meterRegistry);
+
+        // Run 2 threads concurrently racing to write to PostgreSQL
+        java.util.concurrent.ExecutorService executor = Executors.newFixedThreadPool(2);
+        CyclicBarrier barrier = new CyclicBarrier(2);
+        AtomicReference<PaymentResponse> res1 = new AtomicReference<>();
+        AtomicReference<PaymentResponse> res2 = new AtomicReference<>();
+        AtomicReference<Throwable> err1 = new AtomicReference<>();
+        AtomicReference<Throwable> err2 = new AtomicReference<>();
+
+        executor.submit(() -> {
+            try {
+                barrier.await();
+                res1.set(raceTestService.process(key, request));
+            } catch (Throwable t) {
+                err1.set(t);
+            }
+        });
+
+        executor.submit(() -> {
+            try {
+                barrier.await();
+                res2.set(raceTestService.process(key, request));
+            } catch (Throwable t) {
+                err2.set(t);
+            }
+        });
+
+        executor.shutdown();
+        executor.awaitTermination(5, TimeUnit.SECONDS);
+
+        // Verify that BOTH completed successfully (no exceptions thrown, i.e. 500 error bypassed)
+        assertThat(err1.get()).isNull();
+        assertThat(err2.get()).isNull();
+
+        PaymentResponse r1 = res1.get();
+        PaymentResponse r2 = res2.get();
+
+        assertThat(r1).isNotNull();
+        assertThat(r2).isNotNull();
+
+        // Exactly one should be replayed = true, the other is replayed = false
+        assertThat(r1.replayed() ^ r2.replayed()).isTrue();
+
+        // Both must return identical details
+        assertThat(r1.paymentId()).isEqualTo(r2.paymentId());
+        assertThat(r1.ledgerTransactionId()).isEqualTo(r2.ledgerTransactionId());
+        assertThat(r1.status()).isEqualTo("ACCEPTED");
+        assertThat(r2.status()).isEqualTo("ACCEPTED");
+
+        // Verify exactly 1 payment record was inserted in the DB for this key
+        long dbPaymentsCount = paymentRepository.findAll().stream()
+                .filter(p -> p.getIdempotencyKey().equals(key))
+                .count();
+        assertThat(dbPaymentsCount).isEqualTo(1);
+    }
+
+    private static String sha256(String value) {
+        try {
+            java.security.MessageDigest digest = java.security.MessageDigest.getInstance("SHA-256");
+            return java.util.HexFormat.of().formatHex(digest.digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException exception) {
+            throw new IllegalStateException(exception);
         }
     }
 

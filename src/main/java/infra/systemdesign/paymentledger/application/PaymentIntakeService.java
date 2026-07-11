@@ -12,7 +12,6 @@ import org.springframework.stereotype.Service;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.time.Clock;
 import java.util.HexFormat;
 
 
@@ -21,17 +20,14 @@ public class PaymentIntakeService {
 
     private final IdempotencyStore idempotencyStore;
     private final LedgerStore ledgerStore;
-    private final Clock clock;
     private final MeterRegistry meterRegistry;
 
     public PaymentIntakeService(
             IdempotencyStore idempotencyStore,
             LedgerStore ledgerStore,
-            Clock clock,
             MeterRegistry meterRegistry) {
         this.idempotencyStore = idempotencyStore;
         this.ledgerStore = ledgerStore;
-        this.clock = clock;
         this.meterRegistry = meterRegistry;
     }
 

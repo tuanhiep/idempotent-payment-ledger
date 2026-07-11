@@ -29,14 +29,30 @@ The system must make payment intake retry-safe while preserving auditability and
 - Invalid requests must not mutate ledger state.
 - The durable adapter uses PostgreSQL uniqueness and Flyway-managed schema as the production-like correctness boundary.
 
-## Implemented Endpoints
+## Running the Application
 
-Run:
-
+### 1. Start Infrastructure
+Spin up the PostgreSQL and Redis containers:
 ```bash
 docker compose -f system-design/idempotent-payment-ledger/compose.yml up -d
-./mvnw -pl system-design/idempotent-payment-ledger spring-boot:run
 ```
+
+### 2. Run Application
+Choose one of the two active profiles to run the application:
+
+*   **Default Mode (PostgreSQL + In-Memory Cache)**:
+    Uses PostgreSQL for durable ledger entry persistence, but keeps idempotency state in a local JVM-memory store. Ideal for fast local development without external cache dependencies.
+    ```bash
+    ./mvnw -pl system-design/idempotent-payment-ledger spring-boot:run
+    ```
+
+*   **Production-Like Hybrid Mode (PostgreSQL + Redis)**:
+    Uses PostgreSQL for durable ledger entry persistence and Redis for distributed locking (`SETNX`) and idempotency caching. Matches production-scale deployments.
+    ```bash
+    ./mvnw -pl system-design/idempotent-payment-ledger spring-boot:run -Dspring-boot.run.profiles=jpa,redis
+    ```
+
+## Implemented Endpoints
 
 Create a payment:
 
@@ -79,7 +95,7 @@ suite; these tests fail fast rather than falling back to H2.
 
 ## Production Gaps
 
-- The in-memory adapter remains for fast unit-level semantics tests; production-like configuration defaults to Redis for idempotency coordination and JPA/PostgreSQL for ledger durability.
+- The in-memory adapter remains for fast unit-level semantics tests; production-like hybrid configuration uses Redis (jpa,redis profile) for idempotency coordination and JPA/PostgreSQL for ledger durability.
 - No transactional outbox exists yet.
 - No auth or tenant model exist yet.
 - Observability features domain metrics for accepted, replayed, and rejected requests, but does not yet emit structured tracing spans.

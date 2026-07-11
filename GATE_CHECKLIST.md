@@ -47,13 +47,13 @@
 
 - [x] Initial failure modes are documented.
 - [x] Ledger imbalance limitation and next slice are documented.
-- [x] Recovery path is implemented for reconciliation.
+- [ ] Recovery path is implemented for reconciliation. (Deferred to transaction reconciliation poller slice)
 - [x] Timeout-after-commit scenario is simulated. (Verified via integration tests in RedisPaymentIntakeIntegrationTest)
 
 ## Security
 
-- [x] Trust boundary for idempotency keys is documented. (Documented in docs/DESIGN_DOC.md)
-- [x] Tenant/auth model is documented. (Documented in docs/DESIGN_DOC.md)
+- [ ] Trust boundary for idempotency keys is documented. (Deferred to authentication & risk-control slice)
+- [ ] Tenant/auth model is documented. (Deferred to authentication & risk-control slice)
 
 ## Engineering Communication
 
