@@ -27,6 +27,11 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.jdbc.Sql;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.transaction.TransactionDefinition;
+import infra.systemdesign.paymentledger.application.port.IdempotencyStore;
+import infra.systemdesign.paymentledger.infrastructure.persistence.repository.PaymentJpaRepository;
 
 /**
  * High-scale integration tests using Redis for Idempotency and PostgreSQL for Ledger.
@@ -58,6 +63,15 @@ class RedisPaymentIntakeIntegrationTest extends PostgresIntegrationTestSupport {
 
     @Autowired
     private StringRedisTemplate redisTemplate;
+
+    @Autowired
+    private PlatformTransactionManager transactionManager;
+
+    @Autowired
+    private PaymentJpaRepository paymentRepository;
+
+    @org.springframework.test.context.bean.override.mockito.MockitoSpyBean
+    private IdempotencyStore idempotencyStore;
 
     @BeforeEach
     void clearRedis() {
@@ -195,6 +209,75 @@ class RedisPaymentIntakeIntegrationTest extends PostgresIntegrationTestSupport {
         } catch (java.security.NoSuchAlgorithmException exception) {
             throw new IllegalStateException(exception);
         }
+    }
+
+    @Test
+    void whenDatabaseTransactionRollsBack_thenRedisIsNotUpdatedToAccepted() {
+        String key = "redis-rollback-001";
+        PaymentRequest request = request("50.00");
+
+        TransactionTemplate txTemplate = new TransactionTemplate(transactionManager);
+        txTemplate.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
+
+        try {
+            txTemplate.execute(status -> {
+                IdempotencyStore.Reservation reservation = idempotencyStore.reserve(key, sha256(request.payloadFingerprint()));
+                assertThat(reservation).isInstanceOf(IdempotencyStore.NewReservation.class);
+
+                jpaLedgerStore.recordPaymentAndComplete(key, request, (IdempotencyStore.NewReservation) reservation);
+
+                throw new RuntimeException("Simulated Database Rollback");
+            });
+        } catch (RuntimeException e) {
+            assertThat(e.getMessage()).isEqualTo("Simulated Database Rollback");
+        }
+
+        // 1. Verify Postgres has NO payment recorded for this key (durable rollback)
+        boolean paymentExistsInDb = paymentRepository.findByTenantIdAndIdempotencyKey("default", key).isPresent();
+        assertThat(paymentExistsInDb).isFalse();
+
+        // 2. Verify Redis cache was NOT updated to ACCEPTED because the afterCommit hook did not run
+        String redisKey = "idempotency:" + key;
+        String cachedVal = redisTemplate.opsForValue().get(redisKey);
+        if (cachedVal != null) {
+            assertThat(cachedVal).doesNotContain("ACCEPTED");
+        }
+    }
+
+    @Test
+    void whenRedisCommitFailsButDatabaseCommits_thenPaymentIsNotLostAndRetryRecoversViaDbReplay() {
+        String key = "redis-commit-fail-001";
+        PaymentRequest request = request("100.00");
+
+        // 1. Force the complete() call on the spy to throw an exception
+        org.mockito.Mockito.doThrow(new RuntimeException("Redis connection timed out during complete"))
+                .when(idempotencyStore)
+                .complete(org.mockito.Mockito.any(), org.mockito.Mockito.any());
+
+        // 2. Process payment. The DB transaction will commit, but complete() will throw an exception in afterCommit
+        assertThatThrownBy(() -> paymentIntakeService.process(key, request))
+                .isInstanceOf(RuntimeException.class)
+                .hasMessageContaining("Redis connection timed out during complete");
+
+        // 3. Verify the payment IS recorded in Postgres (durable write succeeded despite cache failure)
+        boolean paymentExistsInDb = paymentRepository.findByTenantIdAndIdempotencyKey("default", key).isPresent();
+        assertThat(paymentExistsInDb).isTrue();
+
+        // 4. Reset Mockito spy behavior so we can retry successfully
+        org.mockito.Mockito.reset(idempotencyStore);
+
+        // 5. Client retries the identical request.
+        // Since Redis is now working, but the cache is empty (cache-miss), the system will recover via DB Look-and-Replay
+        PaymentResponse replayResponse = paymentIntakeService.process(key, request);
+
+        assertThat(replayResponse.replayed()).isTrue(); // Served from DB Look-and-Replay
+        assertThat(replayResponse.status()).isEqualTo("ACCEPTED");
+        assertThat(replayResponse.amount()).isEqualByComparingTo("100.00");
+
+        // Verify Redis cache was rebuilt and contains the ACCEPTED status
+        String redisKey = "idempotency:" + key;
+        String cachedVal = redisTemplate.opsForValue().get(redisKey);
+        assertThat(cachedVal).isNotNull().startsWith("ACCEPTED:");
     }
 }
 

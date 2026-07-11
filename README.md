@@ -79,18 +79,14 @@ suite; these tests fail fast rather than falling back to H2.
 
 ## Production Gaps
 
-- The in-memory adapter remains for fast unit-level semantics tests; production-like tests use the JPA/PostgreSQL adapter.
-- The current JPA adapter stores the idempotency claim before the ledger transaction to expose in-flight duplicate requests; crash recovery for stale `PROCESSING` records is not implemented yet.
-- No reconciliation worker exists yet.
+- The in-memory adapter remains for fast unit-level semantics tests; production-like configuration defaults to Redis for idempotency coordination and JPA/PostgreSQL for ledger durability.
 - No transactional outbox exists yet.
-- No auth, tenant model, or risk controls exist yet.
-- Observability is limited to baseline Actuator endpoints.
+- No auth or tenant model exist yet.
+- Observability features domain metrics for accepted, replayed, and rejected requests, but does not yet emit structured tracing spans.
 
 ## Next Engineering Slice
 
-The next slice should not add more endpoints. It should harden the correctness boundary:
-
-- run the Testcontainers suite with Docker enabled and close any schema/runtime gaps it exposes;
-- define stale `PROCESSING` cleanup and retry semantics;
-- introduce a ledger posting rule boundary so balanced entries are produced by an explicit accounting rule;
-- add failure-oriented tests around duplicate concurrency, rollback, and replay after ambiguous completion.
+The next slice should:
+- Implement a Transactional Outbox pattern to safely publish ledger events to a message broker (e.g. Kafka).
+- Refactor Spring Profiles to a centralized `@Configuration` class using `@ConditionalOnMissingBean` for cleaner bean overriding.
+- Design load test scripts and run capacity estimates under high throughput.

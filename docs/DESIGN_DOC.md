@@ -271,7 +271,7 @@ Preferred for the next slice. Payment state, idempotency outcome, ledger transac
 
 ### Redis lock plus database write
 
-Not the default. A Redis lock can reduce duplicate pressure before the database, but it does not replace the database uniqueness constraint. If Redis succeeds and the database fails, the database remains the authority.
+Implemented. We use a **Non-Transactional Coordinator** architecture with a Redis cache-aside locking boundary (`SETNX`). Redis reduces duplicate request pressure at the outer perimeter, preventing database connection exhaustion. Concurrency and consistency are guaranteed via database-level unique constraints (`uq_payments_key`) and pessimistic locking (`SELECT FOR UPDATE`), making PostgreSQL the ultimate source of truth.
 
 ### Event-sourced ledger as the first persistence slice
 
@@ -279,11 +279,9 @@ Deferred. Event sourcing is powerful for audit and replay, but it adds modeling 
 
 ## Trade-Off Analysis
 
-The first slice chooses in-memory storage for fast learning and testability. This is not production-ready, but it lets the module prove the core semantics before adding persistence.
+We transitioned from pure in-memory coordination to a production-grade durable storage layout combining Redis (fast caching/boundary locks) and PostgreSQL (durable balanced ledger ledger state).
 
-The next slice should replace in-memory maps with durable tables and transaction boundaries.
-
-The key trade-off is speed of learning versus production realism. Starting in memory made the invariants easy to inspect. The next milestone must now shift pressure to durable state so failure tests can prove behavior across the same boundary that production would rely on.
+The key trade-off was network efficiency versus transaction consistency. By using a Non-Transactional Coordinator pattern, we decoupled high-latency external network I/O from the database transaction boundary, keeping DB transactions extremely short (~5ms) at the cost of requiring post-commit cache synchronization and a Postgres look-and-replay recovery path.
 
 ## Open Questions
 
