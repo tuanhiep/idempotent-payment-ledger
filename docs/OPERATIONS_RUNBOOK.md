@@ -133,3 +133,32 @@ HAVING a.balance != (
 ```
 *   **Expected Result**: Empty set.
 *   **Action if Triggered**: Out-of-band balance reconciliation is required. Freeze the affected account and verify if manual balance correction is needed.
+
+---
+
+## 🚀 Pre-Flight & Migration Rollout Guide (Postgres V3 Release)
+
+### ⚠️ Pre-Flight Check for Duplicate Payments
+
+Before executing the **V3 unique constraint migration** (`V3__add_unique_constraint_payments.sql`) in a live production database with existing transaction history:
+
+1.  **Detect Duplicate Rows**:
+    Check if any duplicate combinations of `(tenant_id, idempotency_key)` exist:
+    ```sql
+    SELECT tenant_id, idempotency_key, COUNT(*)
+    FROM payments
+    GROUP BY tenant_id, idempotency_key
+    HAVING COUNT(*) > 1;
+    ```
+2.  **Mitigation / Deduplication Action**:
+    If duplicate payments are found, the Flyway migration will fail. You must deduplicate or rename the conflicting keys out-of-band before deploying the V3 application code:
+    ```sql
+    -- Example deduplication script (keeps the oldest payment row per tenant/key)
+    DELETE FROM payments a
+    WHERE a.ctid <> (
+        SELECT min(b.ctid)
+        FROM payments b
+        WHERE a.tenant_id = b.tenant_id 
+          AND a.idempotency_key = b.idempotency_key
+    );
+    ```
