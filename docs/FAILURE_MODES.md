@@ -52,17 +52,27 @@ Scenario:
 
 Ledger entries commit but the idempotency response record does not.
 
-Expected production behavior:
+Expected behavior:
 
-Ledger entries and idempotency records must commit in one durable database transaction. If an outbox event is needed, it must be inserted in the same transaction.
+Durable state must identify whether the payment committed even when cache completion fails.
+An outbox event, when implemented, must be inserted in the same transaction as the
+business state.
 
-Current status (Durable JPA Slice):
+Current status:
 
-Fully implemented. In the `jpa` profile, both `JpaIdempotencyStore` and `JpaLedgerStore` participate in the same Spring database transaction started by `PaymentIntakeService.process()` (`REQUIRED` propagation). If ledger writing or completion fails, the entire transaction (including the idempotency state and ledger entries) rolls back atomically.
+- JPA-only mode commits the payment, account balances, ledger transaction, ledger entries,
+  and `ACCEPTED` idempotency update in the transaction opened by
+  `JpaLedgerStore.recordPaymentAndComplete`. The earlier `PROCESSING` claim is separate and
+  is cleaned up after a business rollback.
+- Hybrid mode commits PostgreSQL first and updates Redis after commit. If Redis completion
+  fails, PostgreSQL remains authoritative and the next retry performs DB look-and-replay.
+- The outbox table exists, but event insertion and publishing are deferred.
 
 Current evidence:
 
-- `JpaPaymentIntakeIntegrationTest.java`
+- `JpaPaymentIntakeIntegrationTest`
+- `RedisPaymentIntakeIntegrationTest.whenDatabaseTransactionRollsBack_thenRedisIsNotUpdatedToAccepted`
+- `RedisPaymentIntakeIntegrationTest.whenRedisCommitFailsButDatabaseCommits_thenPaymentIsNotLostAndRetryRecoversViaDbReplay`
 
 ## Duplicate Concurrent Requests
 
@@ -86,6 +96,28 @@ Current evidence:
 - `PaymentIntakeServiceTest.concurrentDuplicateRequestsCreateOneLedgerTransaction` (In-memory verification)
 - `JpaPaymentIntakeIntegrationTest.java` (Database-level verification under concurrency)
 
+## Expired Redis Lease Followed By A Late Owner
+
+Scenario:
+
+Request A acquires a Redis reservation and pauses. Its TTL expires, request B acquires the
+same key, then A resumes and attempts to complete or fail its stale reservation.
+
+Expected behavior:
+
+A must not overwrite or delete B's reservation. Redis mutation is permitted only when the
+stored owner token still matches the caller's token.
+
+Current status:
+
+Implemented with atomic Lua compare-and-set for completion and compare-and-delete for
+cleanup. PostgreSQL remains the final correctness boundary.
+
+Current evidence:
+
+- `RedisPaymentIntakeIntegrationTest.staleReservationCannotDeleteAReplacementOwner`
+- `RedisPaymentIntakeIntegrationTest.staleReservationCannotCompleteOverAReplacementOwner`
+
 ## Ledger Imbalance
 
 Scenario:
@@ -98,7 +130,11 @@ The transaction must be rejected or reconciled. A valid transaction must have of
 
 Current status (Durable JPA Slice):
 
-Implemented at the storage boundary. Both `InMemoryLedgerStore` and `JpaLedgerStore` enforce that every recorded payment generates exactly two balanced entries: a DEBIT for the payer and a CREDIT for the merchant with matching amounts and currencies. In `JpaLedgerStore`, this is performed within a single database transaction, ensuring zero risk of partial ledger writes on crash.
+The current posting path always generates a matching debit and credit, and PostgreSQL
+commits both entries in one transaction, preventing a crash from committing only one of
+those two application writes. PostgreSQL does not contain a cross-row constraint proving
+that arbitrary future posting rules sum to zero. The reconciliation query detects that
+class of corruption, and a generalized posting-rule validator remains a future extension.
 
 Current evidence:
 
@@ -117,7 +153,7 @@ The system must check the accumulated balance of the payer account before insert
 
 Current status:
 
-Fully implemented. 
+Implemented for the current account model.
 1. We enforce account-level balance validation inside `JpaLedgerStore.recordPayment()`.
 2. Pessimistic Locking (`SELECT FOR UPDATE` on account rows) is performed in a strictly defined consistent locking order (by account ID sorting) to prevent deadlocks while blocking concurrent double-spending attempts.
 3. A database check constraint `chk_accounts_balance_non_negative` (balance >= 0) is installed on the `accounts` table as a hard boundary defense-in-depth.

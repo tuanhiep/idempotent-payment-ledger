@@ -12,31 +12,27 @@ This module demonstrates a retry-safe payment intake path with idempotency keys 
 - Return the same outcome for duplicate requests with the same key and same payload.
 - Reject reuse of the same key with a different payload.
 - Record balanced debit and credit ledger entries.
-- Keep the first slice small enough to reason about correctness.
+- Keep the module small enough to reason about correctness.
 
-## Non-Goals
+## Non-Goals For This Milestone
 
 - Real payment gateway integration.
 - Real money movement.
-- Durable database implementation in the first slice.
 - Multi-tenant auth and risk controls.
-- Distributed locks or cross-region idempotency.
+- Cross-region idempotency.
+- Outbox publishing and downstream settlement.
+- Throughput or capacity claims before measurement.
 
 ## Scale Assumptions
 
-First slice:
+Current scope:
 
-- single process;
-- in-memory state;
-- enough to prove invariants and tests.
-
-Production target:
-
-- many API instances;
-- durable idempotency table;
-- durable ledger table;
-- uniqueness constraint on idempotency key;
-- transactional insert of idempotency record, payment record, ledger entries, and outbox event.
+- PostgreSQL is the durable authority for payments, accounts, and ledger entries;
+- the default JPA profile also stores durable idempotency outcomes in PostgreSQL;
+- the optional Redis profile provides an owner-scoped reservation and replay cache;
+- multiple application instances are safe because PostgreSQL uniqueness and account row
+  locks remain authoritative;
+- throughput and capacity are deliberately unquantified until load tests exist.
 
 ## Functional Requirements
 
@@ -51,7 +47,8 @@ Production target:
 
 - Correctness is more important than throughput for the ledger boundary.
 - Failure behavior must be explicit.
-- The API must be testable without external infrastructure in the first slice.
+- Persistence behavior must be tested against real PostgreSQL and Redis engines through
+  Testcontainers rather than database substitutes.
 - The design must be evolvable toward durable storage and outbox.
 
 ## Proposed Architecture
@@ -69,7 +66,7 @@ flowchart TD
     ledger --> jpa[JpaLedgerStore / PostgreSQL]
     jpa --> debit[Debit payer account]
     jpa --> credit[Credit merchant account]
-    credit --> complete[Complete idempotency reservation / Redis Unlock]
+    credit --> complete[Owner-scoped completion after DB commit]
     complete --> response[Return accepted response]
 ```
 
@@ -80,7 +77,7 @@ api/                  HTTP adapter
 application/          orchestration service
 application/port/     boundaries the application depends on
 domain/               immutable domain records and domain exceptions
-infrastructure/       in-memory adapters for the first slice
+infrastructure/       in-memory, JPA/PostgreSQL, and Redis adapters
 ```
 
 Dependency rule:
@@ -129,12 +126,7 @@ Response:
 
 ## Data Model
 
-First slice:
-
-- in-memory idempotency record map;
-- in-memory ledger entries.
-
-Production target:
+Current durable model:
 
 - `idempotency_records(tenant_id, key, payload_hash, request_body, response_body, status, created_at, completed_at, expires_at)`;
 - `payments(payment_id, idempotency_key, amount, currency, status, created_at)`;
@@ -142,39 +134,38 @@ Production target:
 - `ledger_entries(entry_id, transaction_id, account_id, type, amount, currency, created_at)`;
 - `outbox_events(event_id, aggregate_id, event_type, payload, created_at, published_at)`.
 
+The outbox table exists as an explicit extension point; this milestone does not write or
+publish outbox events.
+
 ## Consistency Model
 
-The ledger mutation and idempotency record must be atomic in production. The first slice uses an `IdempotencyStore` abstraction backed by an in-memory reservation map: the winning request reserves the key, records the ledger mutation, then completes the stored outcome; duplicate same-payload requests wait for or replay that outcome.
+The database is the durable authority. In JPA-only mode, the `PROCESSING` reservation is
+committed in an isolated transaction so competing requests can observe it. The following
+business transaction atomically commits account balances, payment, ledger transaction,
+two ledger entries, and the `ACCEPTED` idempotency outcome. On business failure, a separate
+cleanup transaction removes the unfinished reservation.
 
-The production design should rely on a database transaction and a uniqueness constraint on the idempotency key. Distributed locks are not the first choice for the ledger boundary because the database is already the authority for the write.
+In hybrid mode, Redis owns only the temporary reservation/cache boundary. The database
+business transaction commits first, then an after-commit callback changes Redis from
+`PROCESSING` to `ACCEPTED`. Each Redis lease has an owner token, and completion or cleanup
+uses atomic compare-and-set/delete scripts. PostgreSQL uniqueness remains the final guard
+when Redis is unavailable, evicts a key, or loses a lease.
 
 ## Durable Transaction Boundary
 
 The full DDL is in `src/main/resources/db/migration/V1__init_payment_ledger.sql`.
 The persistence design decision is recorded in `docs/ADR-001-persistence-schema.md`.
 
-The production transaction commits these five writes atomically:
+The implemented JPA business transaction commits these writes atomically:
 
 ```sql
 BEGIN;
-  -- Step 1: claim the idempotency key (race condition guard)
-  INSERT INTO idempotency_records (tenant_id, idempotency_key, payload_hash,
-      request_body, status, expires_at)
-  VALUES (?, ?, ?, ?, 'PROCESSING', now() + interval '7 days');
-  -- If a duplicate key exists, Postgres raises a unique constraint violation.
-  -- The caller catches this, reads the existing record, and either replays
-  -- (status = ACCEPTED) or waits/rejects (status = PROCESSING).
-
-  -- Step 2: write business state
+  -- The PROCESSING claim was made before this transaction.
   INSERT INTO payments (payment_id, tenant_id, idempotency_key, ...);
   INSERT INTO ledger_transactions (transaction_id, payment_id, posting_rule, ...);
   INSERT INTO ledger_entries (entry_id, transaction_id, account_id, 'DEBIT',  amount, ...);
   INSERT INTO ledger_entries (entry_id, transaction_id, account_id, 'CREDIT', amount, ...);
-
-  -- Step 3: register outbox event (same transaction — never lost)
-  INSERT INTO outbox_events (aggregate_id, event_type, payload, ...);
-
-  -- Step 4: complete the idempotency record
+  UPDATE accounts SET balance = ... WHERE account_id = ...;
   UPDATE idempotency_records
      SET status = 'ACCEPTED', response_body = ?, completed_at = now()
    WHERE tenant_id = ? AND idempotency_key = ?;
@@ -185,7 +176,8 @@ Atomicity rule:
 
 ```text
 If the ledger mutation commits, the idempotency outcome must also commit.
-If the idempotency outcome commits, the ledger mutation must also commit.
+In JPA-only mode, an ACCEPTED idempotency outcome implies the ledger mutation committed.
+In hybrid mode, PostgreSQL is authoritative if Redis completion is absent or stale.
 ```
 
 This prevents the dangerous middle state where a retry cannot tell whether
@@ -193,8 +185,9 @@ the original request created ledger side effects.
 
 ### Race Condition Strategy
 
-The `UNIQUE (tenant_id, idempotency_key)` constraint is the primary
-concurrency control mechanism — not application-level locks.
+The `UNIQUE (tenant_id, idempotency_key)` constraints are the final concurrency control
+mechanism. Redis can reject duplicate work earlier, but it cannot authorize a durable
+payment.
 
 ```
 Request A ──► INSERT idempotency_records ──► wins, continues transaction
@@ -204,8 +197,9 @@ Request B ──► INSERT idempotency_records ──► unique violation
                                                   └─► ACCEPTED   → replay response
 ```
 
-This is preferred over `SELECT FOR UPDATE` (requires a prior SELECT) and Redis
-locks (adds a failure domain without stronger atomicity guarantees).
+Account rows use `SELECT FOR UPDATE` in stable account-id order to prevent concurrent
+overdraft and reduce deadlock risk. Redis is deliberately a perimeter optimization, not a
+replacement for database constraints.
 
 ### Index Strategy
 
@@ -233,7 +227,9 @@ collide globally across tenants.
 
 ## Posting Rule Boundary
 
-The current first slice creates a debit and credit pair directly inside the in-memory ledger adapter. That is acceptable for proving the first invariant, but production code should introduce an explicit posting rule boundary:
+The current posting path creates a debit and credit pair directly inside each ledger-store
+adapter. That is sufficient for the single `PAYMENT_ACCEPTED` rule, but a broader ledger
+engine should introduce an explicit posting-rule boundary:
 
 ```text
 PaymentIntakeService
@@ -261,17 +257,23 @@ Rejected. The server cannot trust clients to infer whether a timed-out request c
 
 Insufficient. The system must also bind the key to a payload hash to reject accidental or malicious key reuse.
 
-### Distributed lock around request processing
+### Distributed reservation around request processing
 
-Deferred. A durable uniqueness constraint is simpler and more authoritative for the payment write boundary.
+Implemented as an optional perimeter optimization. It reduces duplicate pressure but
+requires owner tokens, TTL reasoning, and atomic compare operations. It never replaces
+the database uniqueness boundary.
 
 ### Single Postgres transaction
 
-Preferred for the next slice. Payment state, idempotency outcome, ledger transaction, ledger entries, and outbox row can be committed under one source of truth.
+Chosen for durable business state. Payment state, account balances, ledger transaction,
+ledger entries, and the JPA idempotency outcome commit under one source of truth. Outbox
+publishing remains deferred.
 
 ### Redis lock plus database write
 
-Implemented. We use a **Non-Transactional Coordinator** architecture with a Redis cache-aside locking boundary (`SETNX`). Redis reduces duplicate request pressure at the outer perimeter, preventing database connection exhaustion. Concurrency and consistency are guaranteed via database-level unique constraints (`uq_payments_key`) and pessimistic locking (`SELECT FOR UPDATE`), making PostgreSQL the ultimate source of truth.
+Implemented. The hybrid profile uses a non-transactional coordinator with an owner-scoped
+Redis reservation (`SETNX`) and PostgreSQL as the source of truth. Redis may reduce hot-key
+pressure; database uniqueness and pessimistic account locking preserve correctness.
 
 ### Event-sourced ledger as the first persistence slice
 
@@ -279,9 +281,13 @@ Deferred. Event sourcing is powerful for audit and replay, but it adds modeling 
 
 ## Trade-Off Analysis
 
-We transitioned from pure in-memory coordination to a production-grade durable storage layout combining Redis (fast caching/boundary locks) and PostgreSQL (durable balanced ledger ledger state).
+The module provides a production-style durable layout: PostgreSQL protects durable state,
+while Redis is an optional fast reservation/cache boundary.
 
-The key trade-off was network efficiency versus transaction consistency. By using a Non-Transactional Coordinator pattern, we decoupled high-latency external network I/O from the database transaction boundary, keeping DB transactions extremely short (~5ms) at the cost of requiring post-commit cache synchronization and a Postgres look-and-replay recovery path.
+The trade-off is reduced duplicate pressure versus an additional failure domain. Keeping
+Redis I/O outside the database transaction requires owner-aware post-commit synchronization,
+lease-expiry handling, and PostgreSQL look-and-replay recovery. Latency, throughput, and
+capacity remain unclaimed until benchmarked.
 
 ## Open Questions
 

@@ -10,6 +10,7 @@
 - [x] Invalid amount is rejected before ledger mutation.
 - [x] Same account after canonical trimming is rejected before ledger mutation.
 - [x] Amount scale violations return domain validation errors instead of leaking arithmetic failures.
+- [x] A stale Redis lease owner cannot delete or complete over a replacement owner.
 
 ## Architecture
 
@@ -21,6 +22,7 @@
 - [x] Postgres Flyway migration exists with tables, constraints, and indexes (`src/main/resources/db/migration/V1__init_payment_ledger.sql`).
 - [x] ADR-001 documents persistence design decision and lock strategy.
 - [x] JPA persistence adapters replace in-memory adapters (`JpaIdempotencyStore`, `JpaLedgerStore`).
+- [x] Redis reservation ownership and atomic state transitions are documented in ADR-002.
 
 ## Implementation
 
@@ -30,6 +32,8 @@
 - [x] Service-level tests cover core behavior.
 - [x] Service-level concurrent duplicate test covers in-memory idempotency reservation.
 - [x] HTTP integration tests cover duplicate/replay behavior.
+- [x] PostgreSQL and Redis integration tests use real engines through Testcontainers.
+- [x] Flyway upgrade-path test preserves referenced history during V4 cleanup.
 
 ## Operations
 
@@ -64,4 +68,4 @@
 ## Engineering Review
 
 - [x] Architect notes exist.
-- [x] Implementation assumptions and review findings are documented after first red-team pass. (See docs/ARCHITECT_NOTES.md)
+- [x] Implementation assumptions and residual risks are documented. (See docs/ARCHITECT_NOTES.md)

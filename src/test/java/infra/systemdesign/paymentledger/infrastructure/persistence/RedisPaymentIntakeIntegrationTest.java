@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import infra.systemdesign.paymentledger.application.PaymentIntakeService;
+import infra.systemdesign.paymentledger.application.port.IdempotencyStore;
+import infra.systemdesign.paymentledger.application.port.ReservationOwnershipLostException;
 import infra.systemdesign.paymentledger.domain.DuplicateIdempotencyKeyException;
 import infra.systemdesign.paymentledger.domain.InsufficientFundsException;
 import infra.systemdesign.paymentledger.domain.LedgerEntry;
@@ -11,8 +13,10 @@ import infra.systemdesign.paymentledger.domain.PaymentInProgressException;
 import infra.systemdesign.paymentledger.domain.PaymentRequest;
 import infra.systemdesign.paymentledger.domain.PaymentResponse;
 import infra.systemdesign.paymentledger.infrastructure.persistence.repository.LedgerEntryJpaRepository;
+import infra.systemdesign.paymentledger.infrastructure.persistence.repository.PaymentJpaRepository;
 import infra.systemdesign.paymentledger.support.PostgresIntegrationTestSupport;
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
@@ -28,17 +32,15 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.jdbc.Sql;
 import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.transaction.TransactionDefinition;
-import infra.systemdesign.paymentledger.application.port.IdempotencyStore;
-import infra.systemdesign.paymentledger.infrastructure.persistence.repository.PaymentJpaRepository;
+import org.springframework.transaction.support.TransactionTemplate;
 
 /**
  * High-scale integration tests using Redis for Idempotency and PostgreSQL for Ledger.
  *
  * <p>Activates both {@code jpa} and {@code redis} profiles.
  * StringRedisTemplate connects to the Testcontainers Redis instance.
- * Postgres JpaLedgerStore handles durable ledger writes in a 5ms atomic transaction.
+ * PostgreSQL remains the authoritative boundary for durable ledger writes.
  */
 @SpringBootTest
 @ActiveProfiles({"jpa", "redis"})
@@ -75,6 +77,7 @@ class RedisPaymentIntakeIntegrationTest extends PostgresIntegrationTestSupport {
 
     @BeforeEach
     void clearRedis() {
+        org.mockito.Mockito.reset(idempotencyStore);
         // Ensure a completely clean state in Redis before each test
         Objects.requireNonNull(redisTemplate.getConnectionFactory())
                 .getConnection()
@@ -281,5 +284,52 @@ class RedisPaymentIntakeIntegrationTest extends PostgresIntegrationTestSupport {
         String finalCachedVal = redisTemplate.opsForValue().get(redisKey);
         assertThat(finalCachedVal).isNotNull().startsWith("ACCEPTED:");
     }
-}
 
+    @Test
+    void staleReservationCannotDeleteAReplacementOwner() {
+        String key = "redis-stale-fail-001";
+        String payloadHash = sha256(request("25.00").payloadFingerprint());
+        IdempotencyStore.NewReservation staleReservation =
+                (IdempotencyStore.NewReservation) idempotencyStore.reserve(key, payloadHash);
+
+        redisTemplate.delete("idempotency:" + key); // Simulate lease expiry.
+        IdempotencyStore.NewReservation replacementReservation =
+                (IdempotencyStore.NewReservation) idempotencyStore.reserve(key, payloadHash);
+
+        idempotencyStore.fail(staleReservation, new RuntimeException("late failure"));
+
+        assertThat(replacementReservation.ownerToken()).isNotEqualTo(staleReservation.ownerToken());
+        assertThat(redisTemplate.opsForValue().get("idempotency:" + key))
+                .isEqualTo(processingValue(replacementReservation));
+    }
+
+    @Test
+    void staleReservationCannotCompleteOverAReplacementOwner() {
+        String key = "redis-stale-complete-001";
+        String payloadHash = sha256(request("30.00").payloadFingerprint());
+        IdempotencyStore.NewReservation staleReservation =
+                (IdempotencyStore.NewReservation) idempotencyStore.reserve(key, payloadHash);
+
+        redisTemplate.delete("idempotency:" + key); // Simulate lease expiry.
+        IdempotencyStore.NewReservation replacementReservation =
+                (IdempotencyStore.NewReservation) idempotencyStore.reserve(key, payloadHash);
+        PaymentResponse staleResponse = new PaymentResponse(
+                "payment-stale",
+                "transaction-stale",
+                "ACCEPTED",
+                new BigDecimal("30.00"),
+                "USD",
+                false,
+                Instant.parse("2026-07-10T00:00:00Z"));
+
+        assertThatThrownBy(() -> idempotencyStore.complete(staleReservation, staleResponse))
+                .isInstanceOf(ReservationOwnershipLostException.class)
+                .hasMessageContaining("ownership was lost");
+        assertThat(redisTemplate.opsForValue().get("idempotency:" + key))
+                .isEqualTo(processingValue(replacementReservation));
+    }
+
+    private static String processingValue(IdempotencyStore.NewReservation reservation) {
+        return "PROCESSING:" + reservation.payloadHash() + ":" + reservation.ownerToken();
+    }
+}

@@ -55,14 +55,17 @@ public class PaymentIntakeService {
                 // Concurrency DB race lost — the other thread committed first.
                 // Replay the winner's committed payment.
                 try {
-                    idempotencyStore.fail(newReservation, exception); // Release outer-bound lock
                     PaymentResponse replayResponse = ledgerStore.replayPayment(normalizedKey, canonicalRequest, newReservation);
                     incrementMetric("replayed");
                     return replayResponse;
+                } catch (DuplicateIdempotencyKeyException replayConflict) {
+                    idempotencyStore.fail(newReservation, replayConflict);
+                    throw replayConflict;
                 } catch (RuntimeException replayEx) {
                     idempotencyStore.fail(newReservation, replayEx);
                     incrementMetric("failed");
-                    throw replayEx;
+                    exception.addSuppressed(replayEx);
+                    throw exception;
                 }
             } catch (RuntimeException exception) {
                 idempotencyStore.fail(newReservation, exception);

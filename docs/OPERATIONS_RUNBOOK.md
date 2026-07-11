@@ -4,8 +4,11 @@ This document defines the operational procedures, failure recovery runbooks, and
 
 ## 🏛️ System Architecture Overview
 
-The system runs on a hybrid database architecture:
-1.  **Redis (Idempotency Store)**: The high-speed outer boundary caching layer. Uses `SETNX` for atomic lock reservation (`PROCESSING`) and caches successful results (`ACCEPTED`) with a 7-day TTL.
+The module supports a PostgreSQL-only profile and an optional PostgreSQL-plus-Redis profile:
+1.  **Redis (Optional Idempotency Store)**: The outer reservation/cache layer used by the
+    `jpa,redis` profile. It uses `SETNX` to reserve `PROCESSING`, carries a per-owner token,
+    and transitions state only through atomic compare operations. Successful responses
+    are cached as `ACCEPTED` for 7 days.
 2.  **PostgreSQL (Ledger Store)**: The authoritative double-entry bookkeeping ledger. Holds accounts, balances, payments, and balanced ledger transactions (debit/credit entries).
 3.  **Spring Boot Application (PaymentIntakeService)**: The Non-Transactional Coordinator orchestrating boundary checks, balance locking, and transaction commits.
 
@@ -28,7 +31,10 @@ The system runs on a hybrid database architecture:
         WHERE state != 'idle' AND query NOT LIKE '%pg_stat_activity%';
         ```
     3.  Restart database or scale connection pool size if required by adjusting `spring.datasource.hikari.maximum-pool-size` configuration.
-    4.  Note: Redis keys marked `PROCESSING` will naturally expire after 120 seconds. Clients attempting retry during DB outage will receive HTTP `425 Too Early` or HTTP `500`, then automatically transition to clean retries once Postgres recovers.
+    4.  Redis keys marked `PROCESSING` naturally expire after 120 seconds. A request that
+        successfully cleans up its own reservation may permit an earlier retry; otherwise
+        clients receive `425 Too Early` until lease expiry. Database errors remain retryable
+        failures and must not be interpreted as proof that no payment committed.
 
 ### 2. Redis Cluster Outage / Cache Eviction (P1)
 
@@ -68,13 +74,22 @@ The system runs on a hybrid database architecture:
 If a Spring Boot container crashes abruptly *after* reserving a key in Redis but *before* completing or failing the transaction, the Redis key remains stuck as `PROCESSING` for up to 120 seconds.
 *   **Client Response**: HTTP `425 Too Early` ("payment is still being processed").
 *   **Automatic Resolution**: The lock will automatically self-expire after 120 seconds (Redis TTL).
-*   **Manual Intervention (Emergency Force-Unlock)**:
-    If a P0 merchant transaction is blocked and cannot wait 120 seconds:
+*   **Manual Intervention (Emergency Owner-Safe Unlock)**:
+    Prefer waiting for the 120-second TTL. If a critical transaction cannot wait:
     1.  Connect to the Redis instance: `redis-cli`.
     2.  Locate the stuck key safely using `SCAN` to avoid blocking production:
         `SCAN 0 MATCH idempotency:* COUNT 1000`
-    3.  Delete the key: `DEL idempotency:<stuck_key>`.
-    4.  Ask the client to retry immediately.
+    3.  Read the exact value and TTL using `GET idempotency:<stuck_key>` and
+        `PTTL idempotency:<stuck_key>`.
+    4.  Query PostgreSQL for the same idempotency key. If a payment exists, do not unlock;
+        use look-and-replay or repair the cache from the durable outcome.
+    5.  Confirm from logs that the owning request is no longer running.
+    6.  Delete only if the value has not changed since step 3:
+        ```redis
+        EVAL "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end" 1 "idempotency:<stuck_key>" "<exact-value-from-step-3>"
+        ```
+    7.  A result of `0` means ownership changed; stop and investigate. A result of `1`
+        permits the client to retry.
 
 ### 2. Payload Fingerprint Mismatch Conflict (409)
 
@@ -106,16 +121,19 @@ HAVING SUM(CASE WHEN entry_type = 'CREDIT' THEN amount ELSE -amount END) != 0.00
 *   **Expected Result**: Empty set.
 *   **Action if Triggered**: Halt active transaction settlements. Trace database logs for partial writes.
 
-### 2. Database Balance vs Ledger Entry Audit
+### 2. Fixture Balance Diagnostic
 
-Verify that the stored account balance matches the sum of its credit and debit ledger entries, taking into account the initial seeded balances for test accounts (1000.00 for `acct-payer` and `acct-payer-http`).
+The current module initializes local demo balances outside the ledger. Therefore an
+account-level reconstruction requires an explicit baseline and the following query is
+valid only for the documented local fixture (`acct-payer` starts at `1000.00`). It is not a
+production reconciliation proof.
 ```sql
 SELECT
     a.account_id,
     a.balance AS current_stored_balance,
     (
         CASE
-            WHEN a.account_id IN ('acct-payer', 'acct-payer-http') THEN 1000.0000
+            WHEN a.account_id = 'acct-payer' THEN 1000.0000
             ELSE 0.0000
         END
         + COALESCE(SUM(CASE WHEN le.entry_type = 'CREDIT' THEN le.amount ELSE -le.amount END), 0.0000)
@@ -125,18 +143,22 @@ LEFT JOIN ledger_entries le ON a.account_id = le.account_id
 GROUP BY a.account_id, a.balance
 HAVING a.balance != (
     CASE
-        WHEN a.account_id IN ('acct-payer', 'acct-payer-http') THEN 1000.0000
+        WHEN a.account_id = 'acct-payer' THEN 1000.0000
         ELSE 0.0000
     END
     + COALESCE(SUM(CASE WHEN le.entry_type = 'CREDIT' THEN le.amount ELSE -le.amount END), 0.0000)
 );
 ```
 *   **Expected Result**: Empty set.
-*   **Action if Triggered**: Out-of-band balance reconciliation is required. Freeze the affected account and verify if manual balance correction is needed.
+*   **Action if Triggered**: Freeze the affected account and investigate. Do not update a
+    balance in place as an accounting repair; use an auditable compensating transaction.
+*   **Production requirement**: Represent opening balance as a ledger transaction or store
+    a versioned snapshot baseline. Implement the reconciliation worker before using this
+    model for real settlement.
 
 ---
 
-## 🚀 Pre-Flight & Migration Rollout Guide (Postgres V3 Release)
+## 🚀 Pre-Flight & Schema Rollout Guide
 
 ### ⚠️ Pre-Flight Check for Duplicate Payments
 
@@ -164,3 +186,28 @@ Before executing the **V3 unique constraint migration** (`V3__add_unique_constra
       WHERE payment_id = '<non_canonical_payment_id>';
       ```
     - **Audit & Reconcile**: Verify that the associated ledger transactions and entries remain balanced. Execute compensating accounting entries if any discrepancy is found.
+
+### V4 Test-Account Cleanup
+
+V4 removes only known fixture accounts that have no referencing ledger entries. Historical
+accounts already used by ledger history are preserved. The migration upgrade test covers
+the V1-V3 to V4 path with existing payment and ledger data.
+
+Before rollout, report any preserved fixture accounts:
+
+```sql
+SELECT account_id
+FROM accounts
+WHERE tenant_id = 'default'
+  AND account_id IN ('acct-payer', 'acct-merchant', 'acct-payer-http', 'acct-merchant-http');
+```
+
+Do not delete returned accounts if ledger entries reference them. Treat them as historical
+data and rename/classify them only through an audited migration plan.
+
+### Redis Owner-Token Rollout
+
+Older application versions wrote `PROCESSING:<payloadHash>` without an owner token. New
+readers tolerate that legacy value until it expires, but owner-safe completion requires all
+writers to run the new protocol. Drain old instances, then wait at least one processing TTL
+(120 seconds) before declaring the owner-token rollout complete.

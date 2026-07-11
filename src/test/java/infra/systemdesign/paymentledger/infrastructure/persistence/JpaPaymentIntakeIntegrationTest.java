@@ -227,7 +227,7 @@ class JpaPaymentIntakeIntegrationTest extends PostgresIntegrationTestSupport {
         IdempotencyStore mockStore = new IdempotencyStore() {
             @Override
             public Reservation reserve(String key, String payloadHash) {
-                return new NewReservation(key, payloadHash);
+                return new NewReservation(key, payloadHash, "db-race-test-owner");
             }
 
             @Override

@@ -25,15 +25,16 @@ This requires answering three questions before writing any JPA code:
 
 ## Decision
 
-Use a **single Postgres transaction** per accepted payment that commits
-five writes atomically:
+Use PostgreSQL as the authoritative correctness boundary. In JPA-only mode, the
+`PROCESSING` reservation is committed first in an isolated transaction so concurrent
+callers can observe it. The accepted-payment transaction then commits the business
+state and final idempotency outcome atomically:
 
 ```
-INSERT idempotency_records  (status = PROCESSING — claims the key)
 INSERT payments
 INSERT ledger_transactions
 INSERT ledger_entries x2    (balanced debit + credit)
-INSERT outbox_events        (optional domain event)
+UPDATE account balances x2
 UPDATE idempotency_records  (status = ACCEPTED, stores response body)
 ```
 
@@ -42,7 +43,12 @@ concurrency control. Two concurrent requests race on INSERT; one wins, one
 receives a unique constraint violation and falls back to reading the existing
 record.
 
-Full DDL is in `src/main/resources/db/migration/V1__init_payment_ledger.sql`.
+The Redis profile moves only the temporary reservation/cache outside that database
+transaction. PostgreSQL uniqueness remains authoritative. Redis lease ownership is
+specified separately in `ADR-002-redis-reservation-ownership.md`.
+
+The outbox table is reserved in the schema but no event is written or published in this
+milestone. Full DDL is in `src/main/resources/db/migration/V1__init_payment_ledger.sql`.
 
 ## Options Considered
 
@@ -56,8 +62,9 @@ Full DDL is in `src/main/resources/db/migration/V1__init_payment_ledger.sql`.
 | Operability | High — standard Postgres tooling, no extra infra |
 | Testability | High — exercised by PostgreSQL Testcontainers with the same Flyway migration used locally |
 
-**Pros:** atomic by default, uniqueness is enforced at DB level, no extra
-infrastructure, matches how production payment systems actually work.
+**Pros:** uniqueness and durable state are enforced at DB level, no extra infrastructure
+is required for the default profile, and the critical business writes share one source
+of truth.
 
 **Cons:** long-running transactions increase lock contention under high
 throughput; idempotency record holds a row lock while PROCESSING.
@@ -74,7 +81,10 @@ throughput; idempotency record holds a row lock while PROCESSING.
 **Pros:** reduces DB pressure for high-collision keys; lock TTL is configurable.
 
 **Cons:** Redis failure leaves the DB without a guard if not backed by database unique constraints; requires two-phase reasoning across systems; does not replace the DB uniqueness constraint anyway.
-**Evolved Decision:** Evolved from Option A to Option B in the second slice to support high scale under Virtual Threads. By coupling the Redis `SETNX` lock boundary with PostgreSQL unique constraints and look-and-replay recovery, we eliminate database connection pool exhaustion while maintaining strict correctness.
+**Evolved Decision:** Option B is available as a perimeter optimization. Redis `SETNX`
+reduces repeated work for hot keys, while PostgreSQL unique constraints and
+look-and-replay preserve correctness. No throughput or connection-pool reduction is
+claimed until load and capacity tests are run.
 
 ### Option C: Optimistic locking (version column)
 
@@ -95,14 +105,17 @@ We chose a hybrid architecture:
 1. **At the outer edge**: Option B (Redis cache-aside) acts as the high-throughput locking boundary to throttle concurrent requests and prevent DB connection starvation.
 2. **At the persistence layer**: Option A (PostgreSQL) acts as the authoritative correctness boundary. We enforce unique constraints (`uq_payments_key`), pessimistic locking (`SELECT FOR UPDATE`), and balance check constraints (`balance >= 0`) inside the database.
 
-The key trade-off is network latency versus connection pool utilization. By separating the distributed lock boundary (Redis) from the authoritative transactional boundaries (Postgres), we reduce database transaction times to ~5ms, at the operational cost of requiring post-commit synchronization and a look-and-replay recovery path in case of Redis cache eviction or failure.
+The key trade-off is an additional low-latency perimeter against an additional failure
+domain. Separating the Redis lease from PostgreSQL keeps remote cache I/O outside the
+database transaction, but requires owner-aware post-commit synchronization and a
+look-and-replay path when Redis is unavailable, evicts a key, or loses a lease.
 
 ## Consequences
 
 **Becomes easier:**
 - Retry safety is enforced by the DB constraint, not by application code.
-- Crash recovery is automatic: uncommitted transactions roll back; PROCESSING
-  records with no completed_at indicate in-flight requests that need resolution.
+- Uncommitted business transactions roll back; Redis leases self-expire and stale owners
+  cannot mutate replacement leases.
 - Reconciliation job can audit balance by querying `ledger_entries` directly.
 
 **Becomes harder:**
@@ -112,7 +125,7 @@ The key trade-off is network latency versus connection pool utilization. By sepa
   is on the hot write path.
 
 **Must revisit:**
-- PROCESSING timeout and cleanup strategy (crash recovery path).
+- Cleanup policy for durable JPA `PROCESSING` rows.
 - Tenant scoping when multi-tenancy is introduced.
 - Outbox poller implementation and at-least-once delivery guarantees.
 - Index maintenance cost under high insert throughput.
@@ -125,4 +138,5 @@ The key trade-off is network latency versus connection pool utilization. By sepa
 - [x] Implement `JpaLedgerStore` inside the same `@Transactional` boundary
 - [x] Add `@Transactional` integration test covering duplicate replay via `JpaPaymentIntakeIntegrationTest`
 - [x] Add reconciliation query test verifying ledger balance invariant via SQL (`ledgerBalanceInvariantVerifiedByReconciliationQuery`)
-- [ ] Define PROCESSING timeout and cleanup strategy
+- [x] Define Redis PROCESSING timeout and owner-safe cleanup strategy
+- [ ] Define durable JPA PROCESSING-row cleanup strategy

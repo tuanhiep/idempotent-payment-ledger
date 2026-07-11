@@ -11,6 +11,7 @@ import infra.systemdesign.paymentledger.infrastructure.persistence.entity.Idempo
 import infra.systemdesign.paymentledger.infrastructure.persistence.repository.IdempotencyRecordJpaRepository;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.util.UUID;
 import org.springframework.context.annotation.Profile;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Repository;
@@ -157,7 +158,7 @@ public class JpaIdempotencyStore implements IdempotencyStore {
                 );
                 repository.saveAndFlush(entity);
             });
-            return new NewReservation(key, payloadHash);
+            return new NewReservation(key, payloadHash, UUID.randomUUID().toString());
 
         } catch (DataIntegrityViolationException raceLost) {
             // The inner TX rolled back cleanly. The outer TX (from process()) is still

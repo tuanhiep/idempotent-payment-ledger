@@ -24,7 +24,20 @@ public interface IdempotencyStore {
 
     sealed interface Reservation permits NewReservation, ExistingReservation {}
 
-    record NewReservation(String key, String payloadHash) implements Reservation {}
+    record NewReservation(String key, String payloadHash, String ownerToken) implements Reservation {
+
+        public NewReservation {
+            if (key == null || key.isBlank()) {
+                throw new IllegalArgumentException("reservation key must not be blank");
+            }
+            if (payloadHash == null || payloadHash.isBlank()) {
+                throw new IllegalArgumentException("reservation payload hash must not be blank");
+            }
+            if (ownerToken == null || ownerToken.isBlank()) {
+                throw new IllegalArgumentException("reservation owner token must not be blank");
+            }
+        }
+    }
 
     record ExistingReservation(IdempotencyRecord record) implements Reservation {}
 }

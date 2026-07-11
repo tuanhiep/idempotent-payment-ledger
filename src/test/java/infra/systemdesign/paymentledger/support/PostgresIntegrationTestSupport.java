@@ -30,7 +30,7 @@ public abstract class PostgresIntegrationTestSupport {
         registry.add("spring.datasource.password", POSTGRES::getPassword);
         registry.add("spring.datasource.driver-class-name", POSTGRES::getDriverClassName);
         registry.add("spring.jpa.hibernate.ddl-auto", () -> "validate");
-        registry.add("spring.datasource.hikari.maximum-pool-size", () -> "50");
+        registry.add("spring.datasource.hikari.maximum-pool-size", () -> "12");
         registry.add("spring.flyway.enabled", () -> "true");
         registry.add("spring.flyway.locations", () -> "classpath:db/migration");
 
@@ -38,5 +38,16 @@ public abstract class PostgresIntegrationTestSupport {
         registry.add("spring.data.redis.host", REDIS::getHost);
         registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
     }
-}
 
+    protected static String postgresJdbcUrl() {
+        return POSTGRES.getJdbcUrl();
+    }
+
+    protected static String postgresUsername() {
+        return POSTGRES.getUsername();
+    }
+
+    protected static String postgresPassword() {
+        return POSTGRES.getPassword();
+    }
+}

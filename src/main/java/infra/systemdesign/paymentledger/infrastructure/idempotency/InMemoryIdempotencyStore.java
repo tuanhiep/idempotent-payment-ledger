@@ -1,10 +1,12 @@
 package infra.systemdesign.paymentledger.infrastructure.idempotency;
 
 import infra.systemdesign.paymentledger.application.port.IdempotencyStore;
+import infra.systemdesign.paymentledger.application.port.ReservationOwnershipLostException;
 import infra.systemdesign.paymentledger.domain.DuplicateIdempotencyKeyException;
 import infra.systemdesign.paymentledger.domain.IdempotencyRecord;
 import infra.systemdesign.paymentledger.domain.PaymentResponse;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
@@ -21,10 +23,11 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
 
     @Override
     public Reservation reserve(String key, String payloadHash) {
-        InFlightRecord candidate = new InFlightRecord(key, payloadHash);
+        String ownerToken = UUID.randomUUID().toString();
+        InFlightRecord candidate = new InFlightRecord(key, payloadHash, ownerToken);
         InFlightRecord existing = records.putIfAbsent(key, candidate);
         if (existing == null) {
-            return new NewReservation(key, payloadHash);
+            return new NewReservation(key, payloadHash, ownerToken);
         }
         return new ExistingReservation(existing.awaitMatching(payloadHash));
     }
@@ -35,13 +38,15 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
         if (existing == null) {
             throw new IllegalStateException("missing idempotency reservation for key " + reservation.key());
         }
-        existing.complete(new IdempotencyRecord(reservation.key(), reservation.payloadHash(), response));
+        existing.complete(
+                reservation.ownerToken(),
+                new IdempotencyRecord(reservation.key(), reservation.payloadHash(), response));
     }
 
     @Override
     public void fail(NewReservation reservation, RuntimeException failure) {
         InFlightRecord existing = records.get(reservation.key());
-        if (existing != null) {
+        if (existing != null && existing.isOwnedBy(reservation.ownerToken())) {
             existing.fail(failure);
             records.remove(reservation.key(), existing);
         }
@@ -51,15 +56,17 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
 
         private final String key;
         private final String payloadHash;
+        private final String ownerToken;
         private final Lock lock = new ReentrantLock();
         private final Condition completed = lock.newCondition();
         private IdempotencyRecord completedRecord;
         private RuntimeException failure;
         private boolean done;
 
-        private InFlightRecord(String key, String payloadHash) {
+        private InFlightRecord(String key, String payloadHash, String ownerToken) {
             this.key = key;
             this.payloadHash = payloadHash;
+            this.ownerToken = ownerToken;
         }
 
         private IdempotencyRecord awaitMatching(String incomingPayloadHash) {
@@ -86,15 +93,23 @@ public class InMemoryIdempotencyStore implements IdempotencyStore {
             }
         }
 
-        private void complete(IdempotencyRecord record) {
+        private void complete(String completingOwnerToken, IdempotencyRecord record) {
             lock.lock();
             try {
+                if (!isOwnedBy(completingOwnerToken)) {
+                    throw new ReservationOwnershipLostException(
+                            "idempotency reservation ownership was lost for key " + key);
+                }
                 completedRecord = record;
                 done = true;
                 completed.signalAll();
             } finally {
                 lock.unlock();
             }
+        }
+
+        private boolean isOwnedBy(String candidateOwnerToken) {
+            return ownerToken.equals(candidateOwnerToken);
         }
 
         private void fail(RuntimeException exception) {

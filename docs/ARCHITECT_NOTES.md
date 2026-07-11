@@ -22,7 +22,8 @@ This document outlines the key architectural decisions, design trade-offs, and p
 To enforce transaction consistency under concurrent attempts, a database-level unique constraint `uq_payments_key UNIQUE (tenant_id, idempotency_key)` is enforced on the `payments` table. This serves as the safety net if the distributed cache layer (Redis) fails or experiences key eviction.
 
 ### 2.2. Concurrency Race Recovery (Look-and-Replay)
-When concurrent requests with the same idempotency key bypass the cache layer (e.g., during lock thrashing or cache eviction) and execute the write path simultaneously:
+When concurrent requests with the same idempotency key bypass the cache layer (for example,
+during lease expiry or cache eviction) and execute the write path simultaneously:
 1.  **Winner Thread**: Successfully inserts the payment and commits.
 2.  **Loser Thread**: Fails with a `DataIntegrityViolationException` at the database level.
 3.  **Recovery Path**: The coordinator catches the uniqueness violation, rolls back the poisoned database transaction, and executes a read-only replay (`replayPayment`) in a clean session context. This resolves the race condition transparently for the caller, returning `replayed = true` and the original payment details instead of an HTTP 500 error.
@@ -33,9 +34,12 @@ When concurrent requests with the same idempotency key bypass the cache layer (e
 
 ### 3.1. Post-Commit Cache Failure Handling
 If the database transaction commits successfully but the subsequent cache completion call (`complete()`) fails due to a network glitch or Redis timeout:
-*   **Durable State**: The business state in the database is the single source of truth and is successfully committed. We charge the customer and record the ledger entries.
+*   **Durable State**: The business state in the database is the single source of truth and
+    is successfully committed. The payment outcome and ledger entries remain available.
 *   **API Response**: The request returns `ACCEPTED` (HTTP 200/201) to the client. We swallow the cache write exception and log it as a warning to prevent returning an HTTP 500 error, which could cause client-side double-charging confusion.
-*   **Self-Cleaning Lock**: In the catch block of the post-commit cache update failure, we immediately trigger a `fail()` callback to release the `PROCESSING` key in the cache. This prevents the idempotency lock from getting stuck for the entire TTL window (120 seconds), allowing immediate retries.
+*   **Owner-Safe Cleanup**: In the catch block of a post-commit cache update failure, a
+    `fail()` callback attempts to release `PROCESSING` only if the owner token still matches.
+    It cannot delete a replacement lease acquired after TTL expiry.
 *   **Transparent Recovery**: A subsequent retry from the client immediately hits the database Look-and-Replay path, rebuilds the Redis cache, and returns `replayed = true` cleanly.
 
 ---
@@ -44,6 +48,10 @@ If the database transaction commits successfully but the subsequent cache comple
 
 ### 4.1. Migration Safety (Deduplication Check)
 Applying the V3 unique constraint to an existing production database with historical transaction data requires pre-flight audits to identify and resolve any duplicate keys. Refer to the [Operations Runbook](OPERATIONS_RUNBOOK.md) for details on pre-migration cleanup queries.
+
+V4 removes historical fixture accounts only when no ledger entry references them. The
+upgrade-path test migrates a V3 schema containing ledger history and verifies that referenced
+accounts survive while unused fixtures are removed.
 
 ### 4.2. Load Testing & Capacity Estimation
 While the core concurrency invariants are functionally verified under concurrent thread simulations, future work should include running synthetic load simulations (e.g., 5,000+ concurrent requests) to benchmark Redis lock performance and compute production RAM allocation requirements based on anticipated throughput.

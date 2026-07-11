@@ -2,7 +2,7 @@
 
 Track: `system-design`
 
-Production-style module for retry-safe payment intake and balanced ledger mutation. The first slice models an API that accepts a payment request with an `Idempotency-Key`, persists the first outcome, replays duplicate requests with the same payload, rejects reused keys with different payloads, and records balanced debit/credit ledger entries.
+Production-style module for retry-safe payment intake and balanced ledger mutation. It accepts a payment request with an `Idempotency-Key`, persists the first outcome, replays duplicate requests with the same payload, rejects reused keys with different payloads, and records balanced debit/credit ledger entries.
 
 The bar for this module is evidence, not labels: every claim should be implemented in code, covered by tests, or listed as a production gap.
 
@@ -40,17 +40,31 @@ docker compose -f system-design/idempotent-payment-ledger/compose.yml up -d
 ### 2. Run Application
 Choose one of the two active profiles to run the application:
 
-*   **Default Mode (PostgreSQL + In-Memory Cache)**:
-    Uses PostgreSQL for durable ledger entry persistence, but keeps idempotency state in a local JVM-memory store. Ideal for fast local development without external cache dependencies.
+*   **Default Mode (PostgreSQL)**:
+    Uses PostgreSQL for both durable idempotency records and ledger state. This is the smallest runnable correctness configuration and does not require Redis.
     ```bash
     ./mvnw -pl system-design/idempotent-payment-ledger spring-boot:run
     ```
 
 *   **Production-Like Hybrid Mode (PostgreSQL + Redis)**:
-    Uses PostgreSQL for durable ledger entry persistence and Redis for distributed locking (`SETNX`) and idempotency caching. Matches production-scale deployments.
+    Uses PostgreSQL as the authoritative correctness boundary and Redis as an outer reservation/cache layer. Redis reservations carry owner tokens and use atomic compare-and-set/delete scripts so an expired owner cannot overwrite or delete a replacement lease. This mode demonstrates production-style failure handling; throughput and capacity claims remain deferred until measured.
     ```bash
     ./mvnw -pl system-design/idempotent-payment-ledger spring-boot:run -Dspring-boot.run.profiles=jpa,redis
     ```
+
+### 3. Seed Local Demo Accounts
+
+After the application starts and Flyway creates the schema, load the two accounts used by
+the request example:
+
+```bash
+docker compose -f system-design/idempotent-payment-ledger/compose.yml exec -T postgres \
+  psql -U paymentledger -d paymentledger \
+  < system-design/idempotent-payment-ledger/scripts/seed-local-accounts.sql
+```
+
+Demo data is deliberately kept outside Flyway migrations so schema rollout never inserts
+test accounts.
 
 ## Implemented Endpoints
 
@@ -87,6 +101,13 @@ Covered by `PaymentControllerIntegrationTest`:
 - HTTP duplicate request is replayed;
 - HTTP duplicate key with changed payload returns `409 Conflict`.
 
+Covered by persistence and upgrade-path tests:
+
+- PostgreSQL uniqueness resolves concurrent writers to one payment plus one replay;
+- account locking prevents concurrent overdraft;
+- Redis stale owners cannot delete or complete over replacement reservations;
+- Flyway V4 preserves historical accounts referenced by ledger entries while removing unused fixtures.
+
 `PaymentLedgerApplicationTests` verifies Spring context wiring.
 
 Persistence tests use PostgreSQL through Testcontainers and the same Flyway
@@ -95,14 +116,16 @@ suite; these tests fail fast rather than falling back to H2.
 
 ## Production Gaps
 
-- The in-memory adapter remains for fast unit-level semantics tests; production-like hybrid configuration uses Redis (jpa,redis profile) for idempotency coordination and JPA/PostgreSQL for ledger durability.
+- The in-memory adapter remains only for fast unit-level semantics tests; the default runnable profile uses JPA/PostgreSQL.
 - No transactional outbox exists yet.
 - No auth or tenant model exist yet.
 - Observability features domain metrics for accepted, replayed, and rejected requests, but does not yet emit structured tracing spans.
+- Account-to-ledger reconciliation requires an explicit opening-balance transaction or snapshot baseline; the current module proves transaction-level balance and defers the reconciliation worker.
 
-## Next Engineering Slice
+## Deferred Extensions
 
-The next slice should:
+The following capabilities are intentionally outside this module's closure boundary:
+
 - Implement a Transactional Outbox pattern to safely publish ledger events to a message broker (e.g. Kafka).
 - Refactor Spring Profiles to a centralized `@Configuration` class using `@ConditionalOnMissingBean` for cleaner bean overriding.
 - Design load test scripts and run capacity estimates under high throughput.
