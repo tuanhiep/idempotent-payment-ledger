@@ -145,5 +145,13 @@ public class InMemoryLedgerStore implements LedgerStore {
         idempotencyStore.complete(reservation, response);
         return response;
     }
+
+    @Override
+    public PaymentResponse replayPayment(
+            String idempotencyKey,
+            PaymentRequest request,
+            IdempotencyStore.NewReservation reservation) {
+        throw new UnsupportedOperationException("Replay by key not supported in-memory");
+    }
 }
 

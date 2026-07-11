@@ -65,11 +65,5 @@ class PaymentController {
                 .body(new ErrorResponse("INTERNAL_SERVER_ERROR", "An unexpected internal error occurred."));
     }
 
-    @ExceptionHandler(Exception.class)
-    ResponseEntity<ErrorResponse> genericException(Exception exception) {
-        return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
-                .body(new ErrorResponse("INTERNAL_SERVER_ERROR", "An unexpected error occurred."));
-    }
-
     record ErrorResponse(String code, String message) {}
 }

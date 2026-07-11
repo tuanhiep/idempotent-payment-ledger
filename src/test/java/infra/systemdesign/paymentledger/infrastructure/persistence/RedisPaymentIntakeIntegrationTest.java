@@ -261,19 +261,16 @@ class RedisPaymentIntakeIntegrationTest extends PostgresIntegrationTestSupport {
         boolean paymentExistsInDb = paymentRepository.findByTenantIdAndIdempotencyKey("default", key).isPresent();
         assertThat(paymentExistsInDb).isTrue();
 
-        // 4. Verify Redis cache was NOT completed and remains in PROCESSING state
+        // 4. Verify Redis cache lock was successfully cleaned up and is null (allowing immediate retry)
         String redisKey = "idempotency:" + key;
         String cachedVal = redisTemplate.opsForValue().get(redisKey);
-        assertThat(cachedVal).isNotNull().startsWith("PROCESSING:");
+        assertThat(cachedVal).isNull();
 
         // 5. Reset Mockito spy behavior so we can retry successfully
         org.mockito.Mockito.reset(idempotencyStore);
 
-        // 6. Manually delete the stuck PROCESSING lock to simulate key expiration (TTL timeout) or manual force-unlock
-        redisTemplate.delete(redisKey);
-
-        // 7. Client retries the identical request.
-        // Since Redis is now working, but the cache is empty (cache-miss), the system recovers via DB Look-and-Replay
+        // 6. Client retries the identical request.
+        // Since Redis is now working, and the cache was cleaned up (cache-miss), the system recovers via DB Look-and-Replay
         PaymentResponse replayResponse = paymentIntakeService.process(key, request);
 
         assertThat(replayResponse.replayed()).isTrue(); // Served from DB Look-and-Replay

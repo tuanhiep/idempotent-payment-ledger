@@ -28,6 +28,10 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.dao.DataIntegrityViolationException;
 
 /**
  * Durable ledger store backed by a relational database.
@@ -196,48 +200,55 @@ public class JpaLedgerStore implements LedgerStore {
         
         java.util.Optional<PaymentEntity> existingOpt = paymentRepository.findByTenantIdAndIdempotencyKey(TENANT_ID, idempotencyKey);
         if (existingOpt.isPresent()) {
-            return replayExistingPayment(idempotencyKey, request, reservation);
+            return replayPayment(idempotencyKey, request, reservation);
         }
 
-        try {
-            LedgerWriteResult ledgerWrite = recordPayment(idempotencyKey, request);
-            
-            PaymentResponse response = new PaymentResponse(
-                    ledgerWrite.paymentId(),
-                    ledgerWrite.ledgerTransactionId(),
-                    "ACCEPTED",
-                    request.amount(),
-                    request.currency(),
-                    false,
-                    clock.instant()
-            );
-            
-            if (TransactionSynchronizationManager.isActualTransactionActive() && idempotencyStore.requiresAfterCommitCompletion()) {
-                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                    @Override
-                    public void afterCommit() {
+        LedgerWriteResult ledgerWrite = recordPayment(idempotencyKey, request);
+        
+        PaymentResponse response = new PaymentResponse(
+                ledgerWrite.paymentId(),
+                ledgerWrite.ledgerTransactionId(),
+                "ACCEPTED",
+                request.amount(),
+                request.currency(),
+                false,
+                clock.instant()
+        );
+        
+        if (TransactionSynchronizationManager.isActualTransactionActive() && idempotencyStore.requiresAfterCommitCompletion()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    try {
+                        idempotencyStore.complete(reservation, response);
+                    } catch (RuntimeException e) {
+                        log.error("Failed to complete idempotency reservation in cache after database transaction commit: key={}", reservation.key(), e);
                         try {
-                            idempotencyStore.complete(reservation, response);
-                        } catch (RuntimeException e) {
-                            log.error("Failed to complete idempotency reservation in cache after database transaction commit: key={}", reservation.key(), e);
+                            idempotencyStore.fail(reservation, e);
+                        } catch (RuntimeException failEx) {
+                            log.error("Failed to clean up reservation cache lock after completion failure: key={}", reservation.key(), failEx);
                         }
                     }
-                });
-            } else {
+                }
+            });
+        } else {
+            try {
+                idempotencyStore.complete(reservation, response);
+            } catch (RuntimeException e) {
+                log.error("Failed to complete idempotency reservation in cache: key={}", reservation.key(), e);
                 try {
-                    idempotencyStore.complete(reservation, response);
-                } catch (RuntimeException e) {
-                    log.error("Failed to complete idempotency reservation in cache: key={}", reservation.key(), e);
+                    idempotencyStore.fail(reservation, e);
+                } catch (RuntimeException failEx) {
+                    log.error("Failed to clean up reservation cache lock: key={}", reservation.key(), failEx);
                 }
             }
-            return response;
-        } catch (org.springframework.dao.DataIntegrityViolationException e) {
-            // Lost the database-level race — reload the winner's payment and replay it
-            return replayExistingPayment(idempotencyKey, request, reservation);
         }
+        return response;
     }
 
-    private PaymentResponse replayExistingPayment(
+    @Override
+    @Transactional(propagation = Propagation.REQUIRED)
+    public PaymentResponse replayPayment(
             String idempotencyKey,
             PaymentRequest request,
             IdempotencyStore.NewReservation reservation) {

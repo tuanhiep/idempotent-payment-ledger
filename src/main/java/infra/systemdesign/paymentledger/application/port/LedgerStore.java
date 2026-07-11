@@ -16,6 +16,12 @@ public interface LedgerStore {
             IdempotencyStore.NewReservation reservation
     );
 
+    PaymentResponse replayPayment(
+            String idempotencyKey,
+            PaymentRequest request,
+            IdempotencyStore.NewReservation reservation
+    );
+
     List<LedgerEntry> entriesForTransaction(String transactionId);
 
 

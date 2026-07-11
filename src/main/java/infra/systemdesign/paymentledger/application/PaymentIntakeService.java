@@ -50,11 +50,24 @@ public class PaymentIntakeService {
             IdempotencyStore.NewReservation newReservation = (IdempotencyStore.NewReservation) reservation;
             try {
                 PaymentResponse response = ledgerStore.recordPaymentAndComplete(normalizedKey, canonicalRequest, newReservation);
-                incrementMetric("accepted");
+                incrementMetric(response.replayed() ? "replayed" : "accepted");
                 return response;
             } catch (DuplicateIdempotencyKeyException | PaymentInProgressException exception) {
                 idempotencyStore.fail(newReservation, exception);
                 throw exception;
+            } catch (org.springframework.dao.DataIntegrityViolationException exception) {
+                // Concurrency DB race lost — the other thread committed first.
+                // Replay the winner's committed payment.
+                try {
+                    idempotencyStore.fail(newReservation, exception); // Release outer-bound lock
+                    PaymentResponse replayResponse = ledgerStore.replayPayment(normalizedKey, canonicalRequest, newReservation);
+                    incrementMetric("replayed");
+                    return replayResponse;
+                } catch (RuntimeException replayEx) {
+                    idempotencyStore.fail(newReservation, replayEx);
+                    incrementMetric("failed");
+                    throw replayEx;
+                }
             } catch (RuntimeException exception) {
                 idempotencyStore.fail(newReservation, exception);
                 incrementMetric("failed");
