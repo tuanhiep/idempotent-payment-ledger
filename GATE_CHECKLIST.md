@@ -40,8 +40,8 @@
 ## Scale
 
 - [x] Scale assumptions are documented.
-- [x] Load test exists. (Deferred to high-throughput performance tuning phase; see docs/ARCHITECT_NOTES.md)
-- [x] Capacity estimate exists. (Deferred to high-throughput performance tuning phase; see docs/ARCHITECT_NOTES.md)
+- [ ] Load test exists. (Deferred to high-throughput performance tuning phase; see docs/ARCHITECT_NOTES.md)
+- [ ] Capacity estimate exists. (Deferred to high-throughput performance tuning phase; see docs/ARCHITECT_NOTES.md)
 
 ## Failure
 
