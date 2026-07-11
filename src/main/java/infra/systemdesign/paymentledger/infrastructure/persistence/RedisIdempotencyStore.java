@@ -42,26 +42,28 @@ public class RedisIdempotencyStore implements IdempotencyStore {
         String redisKey = KEY_PREFIX + key;
         String processingVal = "PROCESSING:" + payloadHash;
 
-        // Atomic Set-NX (Only if Not Exists) with TTL for processing lock
-        Boolean success = redisTemplate.opsForValue().setIfAbsent(
-                redisKey,
-                processingVal,
-                Duration.ofSeconds(LOCK_TTL_SECONDS)
-        );
+        for (int attempt = 0; attempt < 3; attempt++) {
+            // Atomic Set-NX (Only if Not Exists) with TTL for processing lock
+            Boolean success = redisTemplate.opsForValue().setIfAbsent(
+                    redisKey,
+                    processingVal,
+                    Duration.ofSeconds(LOCK_TTL_SECONDS)
+            );
 
-        if (Boolean.TRUE.equals(success)) {
-            return new NewReservation(key, payloadHash);
+            if (Boolean.TRUE.equals(success)) {
+                return new NewReservation(key, payloadHash);
+            }
+
+            // Key already exists — retrieve value and resolve state
+            String val = redisTemplate.opsForValue().get(redisKey);
+            if (val != null) {
+                return resolveExisting(key, val, payloadHash);
+            }
+            // If val is null, it means a race condition occurred: key expired or was deleted just between setIfAbsent and get.
+            // Loop and retry.
         }
 
-        // Key already exists — retrieve value and resolve state
-        String val = redisTemplate.opsForValue().get(redisKey);
-        if (val == null) {
-            // Race condition: key expired or was deleted just between setIfAbsent and get.
-            // Retry reservation once recursively.
-            return reserve(key, payloadHash);
-        }
-
-        return resolveExisting(key, val, payloadHash);
+        throw new IllegalStateException("Failed to reserve idempotency key " + key + " due to extreme concurrency lock racing.");
     }
 
     @Override

@@ -38,6 +38,8 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 @Profile("jpa")
 public class JpaLedgerStore implements LedgerStore {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(JpaLedgerStore.class);
+
     private static final String TENANT_ID = "default";
     private static final String POSTING_RULE = "PAYMENT_ACCEPTED";
     private static final int POSTING_RULE_VERSION = 1;
@@ -95,7 +97,7 @@ public class JpaLedgerStore implements LedgerStore {
         // Step 1: Validate balance (Overdraft protection / Double-spending prevention)
         if (payer.getBalance().compareTo(request.amount()) < 0) {
             throw new InsufficientFundsException(
-                    "insufficient funds in payer account " + payerId + " (balance: " + payer.getBalance() + ")");
+                    "insufficient funds in payer account " + payerId);
         }
 
         // Step 2: Deduct from payer, add to merchant
@@ -194,55 +196,81 @@ public class JpaLedgerStore implements LedgerStore {
         
         java.util.Optional<PaymentEntity> existingOpt = paymentRepository.findByTenantIdAndIdempotencyKey(TENANT_ID, idempotencyKey);
         if (existingOpt.isPresent()) {
-            PaymentEntity existing = existingOpt.get();
-            // Validate payload consistency
-            if (!existing.getPayerAccountId().equals(request.payerAccountId())
-                    || !existing.getMerchantAccountId().equals(request.merchantAccountId())
-                    || existing.getAmount().compareTo(request.amount()) != 0
-                    || !existing.getCurrency().equals(request.currency())) {
-                throw new DuplicateIdempotencyKeyException(
-                        "idempotency key already exists for a different payment payload");
-            }
-            
-            LedgerTransactionEntity tx = ledgerTransactionRepository.findByPaymentId(existing.getPaymentId())
-                    .orElseThrow(() -> new IllegalStateException("ledger transaction not found for payment: " + existing.getPaymentId()));
-            
-            PaymentResponse response = new PaymentResponse(
-                    existing.getPaymentId(),
-                    tx.getTransactionId(),
-                    existing.getStatus(),
-                    existing.getAmount(),
-                    existing.getCurrency(),
-                    true, // replayed
-                    existing.getCreatedAt().toInstant()
-            );
-            
-            // Rebuild the cache (Redis/InMemory). Since we are not modifying DB, complete immediately
-            idempotencyStore.complete(reservation, response);
-            return response;
+            return replayExistingPayment(idempotencyKey, request, reservation);
         }
 
-        LedgerWriteResult ledgerWrite = recordPayment(idempotencyKey, request);
-        
-        PaymentResponse response = new PaymentResponse(
-                ledgerWrite.paymentId(),
-                ledgerWrite.ledgerTransactionId(),
-                "ACCEPTED",
-                request.amount(),
-                request.currency(),
-                false,
-                clock.instant()
-        );
-        
-        if (TransactionSynchronizationManager.isActualTransactionActive() && idempotencyStore.requiresAfterCommitCompletion()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
+        try {
+            LedgerWriteResult ledgerWrite = recordPayment(idempotencyKey, request);
+            
+            PaymentResponse response = new PaymentResponse(
+                    ledgerWrite.paymentId(),
+                    ledgerWrite.ledgerTransactionId(),
+                    "ACCEPTED",
+                    request.amount(),
+                    request.currency(),
+                    false,
+                    clock.instant()
+            );
+            
+            if (TransactionSynchronizationManager.isActualTransactionActive() && idempotencyStore.requiresAfterCommitCompletion()) {
+                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                    @Override
+                    public void afterCommit() {
+                        try {
+                            idempotencyStore.complete(reservation, response);
+                        } catch (RuntimeException e) {
+                            log.error("Failed to complete idempotency reservation in cache after database transaction commit: key={}", reservation.key(), e);
+                        }
+                    }
+                });
+            } else {
+                try {
                     idempotencyStore.complete(reservation, response);
+                } catch (RuntimeException e) {
+                    log.error("Failed to complete idempotency reservation in cache: key={}", reservation.key(), e);
                 }
-            });
-        } else {
+            }
+            return response;
+        } catch (org.springframework.dao.DataIntegrityViolationException e) {
+            // Lost the database-level race — reload the winner's payment and replay it
+            return replayExistingPayment(idempotencyKey, request, reservation);
+        }
+    }
+
+    private PaymentResponse replayExistingPayment(
+            String idempotencyKey,
+            PaymentRequest request,
+            IdempotencyStore.NewReservation reservation) {
+        PaymentEntity existing = paymentRepository.findByTenantIdAndIdempotencyKey(TENANT_ID, idempotencyKey)
+                .orElseThrow(() -> new IllegalStateException("Payment not found for key: " + idempotencyKey));
+
+        // Validate payload consistency
+        if (!existing.getPayerAccountId().equals(request.payerAccountId())
+                || !existing.getMerchantAccountId().equals(request.merchantAccountId())
+                || existing.getAmount().compareTo(request.amount()) != 0
+                || !existing.getCurrency().equals(request.currency())) {
+            throw new DuplicateIdempotencyKeyException(
+                    "idempotency key already exists for a different payment payload");
+        }
+
+        LedgerTransactionEntity tx = ledgerTransactionRepository.findByPaymentId(existing.getPaymentId())
+                .orElseThrow(() -> new IllegalStateException("ledger transaction not found for payment: " + existing.getPaymentId()));
+
+        PaymentResponse response = new PaymentResponse(
+                existing.getPaymentId(),
+                tx.getTransactionId(),
+                existing.getStatus(),
+                existing.getAmount(),
+                existing.getCurrency(),
+                true, // replayed
+                existing.getCreatedAt().toInstant()
+        );
+
+        try {
+            // Rebuild the cache (Redis/InMemory). Since we are not modifying DB, complete immediately
             idempotencyStore.complete(reservation, response);
+        } catch (RuntimeException e) {
+            log.error("Failed to rebuild cache for replayed payment: key={}", reservation.key(), e);
         }
         return response;
     }

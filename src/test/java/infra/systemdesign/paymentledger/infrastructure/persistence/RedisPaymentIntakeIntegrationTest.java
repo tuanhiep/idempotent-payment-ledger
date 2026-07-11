@@ -236,12 +236,10 @@ class RedisPaymentIntakeIntegrationTest extends PostgresIntegrationTestSupport {
         boolean paymentExistsInDb = paymentRepository.findByTenantIdAndIdempotencyKey("default", key).isPresent();
         assertThat(paymentExistsInDb).isFalse();
 
-        // 2. Verify Redis cache was NOT updated to ACCEPTED because the afterCommit hook did not run
+        // 2. Verify Redis cache remains in PROCESSING state and was NOT updated to ACCEPTED because afterCommit did not run
         String redisKey = "idempotency:" + key;
         String cachedVal = redisTemplate.opsForValue().get(redisKey);
-        if (cachedVal != null) {
-            assertThat(cachedVal).doesNotContain("ACCEPTED");
-        }
+        assertThat(cachedVal).isNotNull().startsWith("PROCESSING:");
     }
 
     @Test
@@ -254,20 +252,28 @@ class RedisPaymentIntakeIntegrationTest extends PostgresIntegrationTestSupport {
                 .when(idempotencyStore)
                 .complete(org.mockito.Mockito.any(), org.mockito.Mockito.any());
 
-        // 2. Process payment. The DB transaction will commit, but complete() will throw an exception in afterCommit
-        assertThatThrownBy(() -> paymentIntakeService.process(key, request))
-                .isInstanceOf(RuntimeException.class)
-                .hasMessageContaining("Redis connection timed out during complete");
+        // 2. Process payment. DB commits, and since afterCommit exception is caught and logged, the request succeeds!
+        PaymentResponse response = paymentIntakeService.process(key, request);
+        assertThat(response.replayed()).isFalse();
+        assertThat(response.status()).isEqualTo("ACCEPTED");
 
         // 3. Verify the payment IS recorded in Postgres (durable write succeeded despite cache failure)
         boolean paymentExistsInDb = paymentRepository.findByTenantIdAndIdempotencyKey("default", key).isPresent();
         assertThat(paymentExistsInDb).isTrue();
 
-        // 4. Reset Mockito spy behavior so we can retry successfully
+        // 4. Verify Redis cache was NOT completed and remains in PROCESSING state
+        String redisKey = "idempotency:" + key;
+        String cachedVal = redisTemplate.opsForValue().get(redisKey);
+        assertThat(cachedVal).isNotNull().startsWith("PROCESSING:");
+
+        // 5. Reset Mockito spy behavior so we can retry successfully
         org.mockito.Mockito.reset(idempotencyStore);
 
-        // 5. Client retries the identical request.
-        // Since Redis is now working, but the cache is empty (cache-miss), the system will recover via DB Look-and-Replay
+        // 6. Manually delete the stuck PROCESSING lock to simulate key expiration (TTL timeout) or manual force-unlock
+        redisTemplate.delete(redisKey);
+
+        // 7. Client retries the identical request.
+        // Since Redis is now working, but the cache is empty (cache-miss), the system recovers via DB Look-and-Replay
         PaymentResponse replayResponse = paymentIntakeService.process(key, request);
 
         assertThat(replayResponse.replayed()).isTrue(); // Served from DB Look-and-Replay
@@ -275,9 +281,8 @@ class RedisPaymentIntakeIntegrationTest extends PostgresIntegrationTestSupport {
         assertThat(replayResponse.amount()).isEqualByComparingTo("100.00");
 
         // Verify Redis cache was rebuilt and contains the ACCEPTED status
-        String redisKey = "idempotency:" + key;
-        String cachedVal = redisTemplate.opsForValue().get(redisKey);
-        assertThat(cachedVal).isNotNull().startsWith("ACCEPTED:");
+        String finalCachedVal = redisTemplate.opsForValue().get(redisKey);
+        assertThat(finalCachedVal).isNotNull().startsWith("ACCEPTED:");
     }
 }
 
