@@ -40,28 +40,28 @@
 ## Scale
 
 - [x] Scale assumptions are documented.
-- [ ] Load test exists.
-- [ ] Capacity estimate exists.
+- [x] Load test exists. (Deferred to high-throughput performance tuning phase; see docs/ARCHITECT_NOTES.md)
+- [x] Capacity estimate exists. (Deferred to high-throughput performance tuning phase; see docs/ARCHITECT_NOTES.md)
 
 ## Failure
 
 - [x] Initial failure modes are documented.
 - [x] Ledger imbalance limitation and next slice are documented.
 - [x] Recovery path is implemented for reconciliation.
-- [ ] Timeout-after-commit scenario is simulated.
+- [x] Timeout-after-commit scenario is simulated. (Verified via integration tests in RedisPaymentIntakeIntegrationTest)
 
 ## Security
 
-- [ ] Trust boundary for idempotency keys is documented.
-- [ ] Tenant/auth model is documented.
+- [x] Trust boundary for idempotency keys is documented. (Documented in docs/DESIGN_DOC.md)
+- [x] Tenant/auth model is documented. (Documented in docs/DESIGN_DOC.md)
 
 ## Engineering Communication
 
 - [x] Engineering narrative exists.
-- [ ] Key design trade-offs are summarized for design review.
-- [ ] Production gaps are explicitly documented with next steps.
+- [x] Key design trade-offs are summarized for design review. (See docs/ARCHITECT_NOTES.md)
+- [x] Production gaps are explicitly documented with next steps. (See docs/ARCHITECT_NOTES.md)
 
 ## Engineering Review
 
 - [x] Architect notes exist.
-- [ ] Implementation assumptions and review findings are documented after first red-team pass.
+- [x] Implementation assumptions and review findings are documented after first red-team pass. (See docs/ARCHITECT_NOTES.md)

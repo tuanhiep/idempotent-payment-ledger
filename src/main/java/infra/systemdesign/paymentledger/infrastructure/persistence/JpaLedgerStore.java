@@ -1,11 +1,8 @@
 package infra.systemdesign.paymentledger.infrastructure.persistence;
 
+import infra.systemdesign.paymentledger.application.port.IdempotencyStore;
 import infra.systemdesign.paymentledger.application.port.LedgerStore;
-import infra.systemdesign.paymentledger.domain.DuplicateIdempotencyKeyException;
-import infra.systemdesign.paymentledger.domain.InsufficientFundsException;
-import infra.systemdesign.paymentledger.domain.LedgerEntry;
-import infra.systemdesign.paymentledger.domain.LedgerEntryType;
-import infra.systemdesign.paymentledger.domain.PaymentRequest;
+import infra.systemdesign.paymentledger.domain.*;
 import infra.systemdesign.paymentledger.infrastructure.persistence.entity.AccountEntity;
 import infra.systemdesign.paymentledger.infrastructure.persistence.entity.LedgerEntryEntity;
 import infra.systemdesign.paymentledger.infrastructure.persistence.entity.LedgerTransactionEntity;
@@ -14,24 +11,19 @@ import infra.systemdesign.paymentledger.infrastructure.persistence.repository.Ac
 import infra.systemdesign.paymentledger.infrastructure.persistence.repository.LedgerEntryJpaRepository;
 import infra.systemdesign.paymentledger.infrastructure.persistence.repository.LedgerTransactionJpaRepository;
 import infra.systemdesign.paymentledger.infrastructure.persistence.repository.PaymentJpaRepository;
-import java.math.BigDecimal;
-import java.time.Clock;
-import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
-import infra.systemdesign.paymentledger.application.port.IdempotencyStore;
-import infra.systemdesign.paymentledger.domain.PaymentResponse;
-import java.util.List;
-import java.util.UUID;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
-import org.springframework.transaction.TransactionDefinition;
-import org.springframework.dao.DataIntegrityViolationException;
+
+import java.math.BigDecimal;
+import java.time.Clock;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.List;
+import java.util.UUID;
 
 /**
  * Durable ledger store backed by a relational database.
@@ -197,14 +189,14 @@ public class JpaLedgerStore implements LedgerStore {
             String idempotencyKey,
             PaymentRequest request,
             IdempotencyStore.NewReservation reservation) {
-        
+
         java.util.Optional<PaymentEntity> existingOpt = paymentRepository.findByTenantIdAndIdempotencyKey(TENANT_ID, idempotencyKey);
         if (existingOpt.isPresent()) {
             return replayPayment(idempotencyKey, request, reservation);
         }
 
         LedgerWriteResult ledgerWrite = recordPayment(idempotencyKey, request);
-        
+
         PaymentResponse response = new PaymentResponse(
                 ledgerWrite.paymentId(),
                 ledgerWrite.ledgerTransactionId(),
@@ -214,7 +206,7 @@ public class JpaLedgerStore implements LedgerStore {
                 false,
                 clock.instant()
         );
-        
+
         if (TransactionSynchronizationManager.isActualTransactionActive() && idempotencyStore.requiresAfterCommitCompletion()) {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
