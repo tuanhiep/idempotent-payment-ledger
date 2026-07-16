@@ -1,8 +1,6 @@
 # Idempotent Payment Ledger
 
-Track: `system-design`
-
-Production-style module for retry-safe payment intake and balanced ledger mutation. It accepts a payment request with an `Idempotency-Key`, persists the first outcome, replays duplicate requests with the same payload, rejects reused keys with different payloads, and records balanced debit/credit ledger entries.
+Production-style case study for retry-safe payment intake and balanced ledger mutation. It accepts a payment request with an `Idempotency-Key`, persists the first outcome, replays duplicate requests with the same payload, rejects reused keys with different payloads, and records balanced debit/credit ledger entries.
 
 The bar for this module is evidence, not labels: every claim should be implemented in code, covered by tests, or listed as a production gap.
 
@@ -34,7 +32,7 @@ The system must make payment intake retry-safe while preserving auditability and
 ### 1. Start Infrastructure
 Spin up the PostgreSQL and Redis containers:
 ```bash
-docker compose -f system-design/idempotent-payment-ledger/compose.yml up -d
+docker compose up -d
 ```
 
 ### 2. Run Application
@@ -43,13 +41,13 @@ Choose one of the two active profiles to run the application:
 *   **Default Mode (PostgreSQL)**:
     Uses PostgreSQL for both durable idempotency records and ledger state. This is the smallest runnable correctness configuration and does not require Redis.
     ```bash
-    ./mvnw -pl system-design/idempotent-payment-ledger spring-boot:run
+    ./mvnw spring-boot:run
     ```
 
 *   **Production-Like Hybrid Mode (PostgreSQL + Redis)**:
     Uses PostgreSQL as the authoritative correctness boundary and Redis as an outer reservation/cache layer. Redis reservations carry owner tokens and use atomic compare-and-set/delete scripts so an expired owner cannot overwrite or delete a replacement lease. This mode demonstrates production-style failure handling; throughput and capacity claims remain deferred until measured.
     ```bash
-    ./mvnw -pl system-design/idempotent-payment-ledger spring-boot:run -Dspring-boot.run.profiles=jpa,redis
+    ./mvnw spring-boot:run -Dspring-boot.run.profiles=jpa,redis
     ```
 
 ### 3. Seed Local Demo Accounts
@@ -58,9 +56,9 @@ After the application starts and Flyway creates the schema, load the two account
 the request example:
 
 ```bash
-docker compose -f system-design/idempotent-payment-ledger/compose.yml exec -T postgres \
+docker compose exec -T postgres \
   psql -U paymentledger -d paymentledger \
-  < system-design/idempotent-payment-ledger/scripts/seed-local-accounts.sql
+  < scripts/seed-local-accounts.sql
 ```
 
 Demo data is deliberately kept outside Flyway migrations so schema rollout never inserts
@@ -113,6 +111,12 @@ Covered by persistence and upgrade-path tests:
 Persistence tests use PostgreSQL through Testcontainers and the same Flyway
 migration used by local Docker. Docker must be running for the persistence
 suite; these tests fail fast rather than falling back to H2.
+
+Run the complete evidence suite from the repository root:
+
+```bash
+./mvnw clean test
+```
 
 ## Production Gaps
 
