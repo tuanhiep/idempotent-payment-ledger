@@ -19,7 +19,7 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Repository;
 
 /**
- * Distributed high-performance idempotency store backed by Redis.
+ * Distributed idempotency reservation and replay store backed by Redis.
  *
  * <p>Uses Redis atomic 'SETNX' (setIfAbsent) as a distributed lock/reservation layer
  * outside of the database transaction, reducing duplicate pressure before requests reach
@@ -80,7 +80,9 @@ public class RedisIdempotencyStore implements IdempotencyStore {
             // Loop and retry.
         }
 
-        throw new IllegalStateException("Failed to reserve idempotency key " + key + " due to extreme concurrency lock racing.");
+        throw new IllegalStateException(
+                "failed to reserve idempotency key " + key
+                        + " after repeated expiry or deletion races");
     }
 
     @Override

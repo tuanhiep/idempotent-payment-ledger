@@ -52,7 +52,7 @@ milestone. Full DDL is in `src/main/resources/db/migration/V1__init_payment_ledg
 
 ## Options Considered
 
-### Option A: Single Postgres transaction with UNIQUE constraint (chosen)
+### Option A: PostgreSQL authority with UNIQUE constraint (chosen for the default profile)
 
 | Dimension | Assessment |
 |---|---|
@@ -66,8 +66,9 @@ milestone. Full DDL is in `src/main/resources/db/migration/V1__init_payment_ledg
 is required for the default profile, and the critical business writes share one source
 of truth.
 
-**Cons:** long-running transactions increase lock contention under high
-throughput; idempotency record holds a row lock while PROCESSING.
+**Cons:** the JPA-only profile needs a separately committed `PROCESSING` reservation so
+competing requests can observe it. A process death between reservation and business commit
+therefore requires an expiry, reclaim, and fencing policy.
 
 ### Option B: Redis lock + Postgres write
 
@@ -102,13 +103,17 @@ Deferred to a future module.
 ## Trade-off Analysis
 
 We chose a hybrid architecture:
-1. **At the outer edge**: Option B (Redis cache-aside) acts as the high-throughput locking boundary to throttle concurrent requests and prevent DB connection starvation.
+1. **At the outer edge**: Option B (Redis cache-aside) can reject hot-key duplicate work
+   before it reaches PostgreSQL. Any throughput or connection-pool benefit must be measured;
+   this project does not claim a capacity result.
 2. **At the persistence layer**: Option A (PostgreSQL) acts as the authoritative correctness boundary. We enforce unique constraints (`uq_payments_key`), pessimistic locking (`SELECT FOR UPDATE`), and balance check constraints (`balance >= 0`) inside the database.
 
 The key trade-off is an additional low-latency perimeter against an additional failure
 domain. Separating the Redis lease from PostgreSQL keeps remote cache I/O outside the
 database transaction, but requires owner-aware post-commit synchronization and a
-look-and-replay path when Redis is unavailable, evicts a key, or loses a lease.
+look-and-replay path when Redis loses cached state, evicts a key, or loses a lease. A total
+Redis connectivity outage does not automatically fall through to PostgreSQL; the hybrid
+request fails until Redis is restored or operators explicitly deploy the JPA-only profile.
 
 ## Consequences
 

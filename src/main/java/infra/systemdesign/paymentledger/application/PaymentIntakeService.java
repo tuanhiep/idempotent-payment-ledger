@@ -32,11 +32,19 @@ public class PaymentIntakeService {
     }
 
     public PaymentResponse process(String idempotencyKey, PaymentRequest request) {
-        String normalizedKey = normalizeKey(idempotencyKey);
-        PaymentRequest canonicalRequest = request.canonical();
-        String payloadHash = sha256(canonicalRequest.payloadFingerprint());
-
         try {
+            String normalizedKey;
+            PaymentRequest canonicalRequest;
+            String payloadHash;
+            try {
+                normalizedKey = normalizeKey(idempotencyKey);
+                canonicalRequest = request.canonical();
+                payloadHash = sha256(canonicalRequest.payloadFingerprint());
+            } catch (IllegalArgumentException exception) {
+                incrementMetric("invalid");
+                throw exception;
+            }
+
             IdempotencyStore.Reservation reservation = idempotencyStore.reserve(normalizedKey, payloadHash);
             if (reservation instanceof IdempotencyStore.ExistingReservation existing) {
                 incrementMetric("replayed");
@@ -63,13 +71,11 @@ public class PaymentIntakeService {
                     throw replayConflict;
                 } catch (RuntimeException replayEx) {
                     idempotencyStore.fail(newReservation, replayEx);
-                    incrementMetric("failed");
                     exception.addSuppressed(replayEx);
                     throw exception;
                 }
             } catch (RuntimeException exception) {
                 idempotencyStore.fail(newReservation, exception);
-                incrementMetric("failed");
                 throw exception;
             }
         } catch (DuplicateIdempotencyKeyException exception) {
@@ -77,6 +83,9 @@ public class PaymentIntakeService {
             throw exception;
         } catch (PaymentInProgressException exception) {
             incrementMetric("early");
+            throw exception;
+        } catch (RuntimeException exception) {
+            incrementMetric("failed");
             throw exception;
         }
     }

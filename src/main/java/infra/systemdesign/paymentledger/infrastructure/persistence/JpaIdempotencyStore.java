@@ -41,9 +41,8 @@ import org.springframework.transaction.support.TransactionTemplate;
  * <p>When a constraint violation occurs inside a Spring {@code @Transactional} method,
  * the Hibernate session enters an error state. Any subsequent JPA call on the same session
  * throws "transaction is marked for rollback". By isolating the INSERT inside a
- * {@code TransactionTemplate}, the failed INSERT rolls back in its own connection;
- * the fallback SELECT runs in a fresh context (the outer transaction from
- * {@code PaymentIntakeService.process()}).
+ * {@code TransactionTemplate}, the failed INSERT rolls back in its own transaction;
+ * the fallback SELECT runs after that failed transaction has been fully closed.
  *
  * <p>Active only when the {@code jpa} Spring profile is set.
  */
@@ -63,8 +62,8 @@ public class JpaIdempotencyStore implements IdempotencyStore {
     private final ObjectMapper objectMapper;
 
     // Runs the INSERT in a completely isolated transaction.
-    // If INSERT fails (unique constraint), only this inner TX rolls back —
-    // the caller's outer transaction from process() is unaffected and continues cleanly.
+    // If INSERT fails (unique constraint), this isolated TX rolls back before the
+    // fallback SELECT. PaymentIntakeService itself does not hold a database transaction.
     private final TransactionTemplate requiresNewTemplate;
 
     public JpaIdempotencyStore(
@@ -81,7 +80,7 @@ public class JpaIdempotencyStore implements IdempotencyStore {
     /**
      * Claims the idempotency key.
      *
-     * <p>Step 1: Fast-path SELECT in the outer transaction from {@code process()}.
+     * <p>Step 1: Fast-path SELECT before the business transaction begins.
      * <p>Step 2: If not found, INSERT PROCESSING in an isolated {@code REQUIRES_NEW}
      * transaction via {@link TransactionTemplate}. The inner TX commits immediately,
      * making the key visible to concurrent requests before the outer TX commits.
@@ -99,8 +98,9 @@ public class JpaIdempotencyStore implements IdempotencyStore {
     /**
      * Marks the idempotency record ACCEPTED and stores the response.
      *
-     * <p>Runs in the outer {@code @Transactional} from {@code PaymentIntakeService.process()}.
-     * The ACCEPTED update and the ledger writes commit atomically — satisfying the invariant:
+     * <p>Joins the business transaction opened by
+     * {@code JpaLedgerStore.recordPaymentAndComplete}. The ACCEPTED update and the ledger
+     * writes commit atomically — satisfying the invariant:
      * "if the ledger mutation commits, the idempotency outcome must also commit."
      */
     @Override
@@ -121,9 +121,8 @@ public class JpaIdempotencyStore implements IdempotencyStore {
      * Removes the PROCESSING record so the next retry gets a clean slate.
      *
      * <p>Uses a {@code REQUIRES_NEW} template so the DELETE commits independently
-     * even when the outer transaction is rolling back. Without this, the DELETE
-     * would roll back with the outer TX, leaving a permanent PROCESSING record
-     * that blocks all retries with 425 Too Early.
+     * independently after a failed business transaction. This prevents cleanup from being
+     * coupled to transaction state that is already rolling back.
      */
     @Override
     public void fail(NewReservation reservation, RuntimeException failure) {
@@ -144,7 +143,7 @@ public class JpaIdempotencyStore implements IdempotencyStore {
         try {
             // INSERT commits immediately in its own transaction.
             // Any concurrent thread that also attempts INSERT will get a constraint
-            // violation, roll back its own inner TX, and fall through to the fallback.
+            // violation, roll back its isolated TX, and fall through to the fallback.
             requiresNewTemplate.executeWithoutResult(status -> {
                 OffsetDateTime now = OffsetDateTime.now(ZoneOffset.UTC);
                 IdempotencyRecordEntity entity = new IdempotencyRecordEntity(
@@ -161,8 +160,7 @@ public class JpaIdempotencyStore implements IdempotencyStore {
             return new NewReservation(key, payloadHash, UUID.randomUUID().toString());
 
         } catch (DataIntegrityViolationException raceLost) {
-            // The inner TX rolled back cleanly. The outer TX (from process()) is still
-            // live and unaffected. Read what the winning thread committed.
+            // The isolated TX rolled back cleanly. Read what the winning request committed.
             return repository.findByTenantIdAndIdempotencyKey(TENANT_ID, key)
                     .map(existing -> resolveExisting(existing, payloadHash))
                     .orElseThrow(() -> new IllegalStateException(

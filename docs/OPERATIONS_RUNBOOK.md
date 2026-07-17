@@ -41,15 +41,20 @@ The module supports a PostgreSQL-only profile and an optional PostgreSQL-plus-Re
 *   **Symptoms**:
     *   API returns HTTP `500` or fails to connect to Redis (`RedisConnectionFailureException`).
     *   Prometheus alert triggers for Redis memory exhaustion or service down.
-*   **Impact**: External boundary locking is disabled. Concurrency race protection falls back entirely to PostgreSQL unique constraints.
+*   **Impact**: Requests using the hybrid `jpa,redis` profile fail at the Redis reservation
+    boundary before reaching PostgreSQL. There is no automatic in-request fallback, because
+    silently changing coordination modes would make behavior and incident diagnosis ambiguous.
 *   **Fallback Mode (JPA-Only Execution)**:
-    If Redis suffers a prolonged outage, the system can be configured to run in **JPA-Only Mode** (bypassing Redis and relying on PostgreSQL for both idempotency locks and ledger writes).
+    If Redis suffers a prolonged outage, operators can deliberately redeploy in **JPA-Only
+    Mode** (bypassing Redis and relying on PostgreSQL for both idempotency reservations and
+    ledger writes). This is an explicit operational mode change, not automatic failover.
     *   **Action**: Change the Spring Boot active profile from `jpa,redis` to `jpa` and redeploy:
         ```bash
         # In application.properties or environment variables:
         spring.profiles.active=jpa
         ```
-        *This wires JpaIdempotencyStore which uses PostgreSQL `idempotency_records` table to enforce single-process/distributed idempotency.*
+        *This wires `JpaIdempotencyStore`, which uses PostgreSQL `idempotency_records` and
+        uniqueness constraints to coordinate application instances sharing the database.*
 *   **Recovery after Redis Restored**:
     1.  Bring Redis back online.
     2.  Restart Redis profile: `spring.profiles.active=jpa,redis`.

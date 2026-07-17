@@ -149,7 +149,9 @@ In hybrid mode, Redis owns only the temporary reservation/cache boundary. The da
 business transaction commits first, then an after-commit callback changes Redis from
 `PROCESSING` to `ACCEPTED`. Each Redis lease has an owner token, and completion or cleanup
 uses atomic compare-and-set/delete scripts. PostgreSQL uniqueness remains the final guard
-when Redis is unavailable, evicts a key, or loses a lease.
+when Redis loses cached state, evicts a key, or a lease expires. A total Redis connectivity
+outage fails the hybrid request at the perimeter; switching to the JPA-only profile is an
+explicit operational action, not an automatic fallback.
 
 ## Durable Transaction Boundary
 

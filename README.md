@@ -176,7 +176,7 @@ Run the complete evidence suite from the repository root:
 ./mvnw clean test
 ```
 
-Current closure evidence: 32 tests execute against PostgreSQL 16 and Redis 7 through Testcontainers. GitHub Actions runs the same clean evidence suite on every push to `main`.
+Current closure evidence: 33 tests execute against PostgreSQL 16 and Redis 7 through Testcontainers. GitHub Actions runs the same clean evidence suite on every push to `main`.
 
 ## Production Gaps
 
@@ -185,7 +185,8 @@ Current closure evidence: 32 tests execute against PostgreSQL 16 and Redis 7 thr
 - The current posting rule generates one matched debit/credit pair and commits both atomically. PostgreSQL does not yet enforce a generalized cross-row sum-to-zero constraint for future posting rules.
 - No transactional outbox exists yet.
 - No auth or tenant model exist yet.
-- Observability features domain metrics for accepted, replayed, and rejected requests, but does not yet emit structured tracing spans.
+- Observability features domain metrics for accepted, replayed, conflict, in-progress,
+  invalid, and failed requests, but does not yet emit structured tracing spans.
 - Account-to-ledger reconciliation requires an explicit opening-balance transaction or snapshot baseline; the current module proves transaction-level balance and defers the reconciliation worker.
 
 ## Deferred Extensions

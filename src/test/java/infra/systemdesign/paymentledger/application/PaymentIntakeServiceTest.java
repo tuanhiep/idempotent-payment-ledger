@@ -137,6 +137,8 @@ class PaymentIntakeServiceTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("amount");
         assertThat(ledgerStore.entryCount()).isZero();
+        assertThat(meterRegistry.counter("payment.intake.requests", "status", "invalid").count())
+                .isEqualTo(1.0);
     }
 
     @Test
@@ -204,6 +206,34 @@ class PaymentIntakeServiceTest {
 
         assertThat(localRegistry.counter("payment.intake.requests", "status", "early").count())
                 .isEqualTo(1.0);
+    }
+
+    @Test
+    void reservationAdapterFailureIsNotMisclassifiedAsInvalidInput() {
+        IdempotencyStore failingStore = new IdempotencyStore() {
+            @Override
+            public Reservation reserve(String key, String payloadHash) {
+                throw new IllegalArgumentException("Redis command encoding failed");
+            }
+
+            @Override
+            public void complete(NewReservation reservation, PaymentResponse response) {}
+
+            @Override
+            public void fail(NewReservation reservation, RuntimeException failure) {}
+        };
+        MeterRegistry localRegistry = new SimpleMeterRegistry();
+        PaymentIntakeService serviceWithFailure = new PaymentIntakeService(
+                failingStore, ledgerStore, localRegistry);
+
+        assertThatThrownBy(() -> serviceWithFailure.process("pay-redis-down", request("50.00")))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("Redis command encoding failed");
+
+        assertThat(localRegistry.counter("payment.intake.requests", "status", "failed").count())
+                .isEqualTo(1.0);
+        assertThat(localRegistry.counter("payment.intake.requests", "status", "invalid").count())
+                .isZero();
     }
 
     private static PaymentRequest request(String amount) {
