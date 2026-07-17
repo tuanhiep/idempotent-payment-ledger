@@ -49,7 +49,7 @@ class PaymentController {
 
     @ExceptionHandler(InsufficientFundsException.class)
     ResponseEntity<ErrorResponse> insufficientFunds(InsufficientFundsException exception) {
-        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_ENTITY)
+        return ResponseEntity.status(HttpStatus.UNPROCESSABLE_CONTENT)
                 .body(new ErrorResponse("INSUFFICIENT_FUNDS", exception.getMessage()));
     }
 

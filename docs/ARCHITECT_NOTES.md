@@ -1,6 +1,6 @@
 # Architectural Notes & Design Trade-offs
 
-This document outlines the key architectural decisions, design trade-offs, and production resiliency patterns implemented in the Idempotent Payment Ledger module.
+This document outlines the key architectural decisions, design trade-offs, and production resiliency patterns implemented in the Idempotent Payment Ledger project.
 
 ---
 
@@ -19,7 +19,7 @@ This document outlines the key architectural decisions, design trade-offs, and p
 ## 2. Concurrency Control & Database-Level Defense-in-Depth
 
 ### 2.1. Uniqueness Guarantee (V3 Migration)
-To enforce transaction consistency under concurrent attempts, a database-level unique constraint `uq_payments_key UNIQUE (tenant_id, idempotency_key)` is enforced on the `payments` table. This serves as the safety net if the distributed cache layer (Redis) fails or experiences key eviction.
+To enforce transaction consistency under concurrent attempts, a database-level unique constraint `uq_payments_key UNIQUE (tenant_id, idempotency_key)` is enforced on the `payments` table. This is the safety net when Redis state is evicted, a lease expires, or duplicate work otherwise bypasses the perimeter. A total Redis connectivity outage still fails the hybrid request before the database and requires restoration or an explicit switch to JPA-only mode.
 
 ### 2.2. Concurrency Race Recovery (Look-and-Replay)
 When concurrent requests with the same idempotency key bypass the cache layer (for example,
@@ -40,7 +40,7 @@ If the database transaction commits successfully but the subsequent cache comple
 *   **Owner-Safe Cleanup**: In the catch block of a post-commit cache update failure, a
     `fail()` callback attempts to release `PROCESSING` only if the owner token still matches.
     It cannot delete a replacement lease acquired after TTL expiry.
-*   **Transparent Recovery**: A subsequent retry from the client immediately hits the database Look-and-Replay path, rebuilds the Redis cache, and returns `replayed = true` cleanly.
+*   **Transparent Recovery**: When owner-safe cleanup succeeds and Redis is reachable, a subsequent retry acquires a fresh reservation, hits the database Look-and-Replay path, rebuilds the cache, and returns `replayed = true` cleanly.
 
 ---
 
@@ -53,5 +53,17 @@ V4 removes historical fixture accounts only when no ledger entry references them
 upgrade-path test migrates a V3 schema containing ledger history and verifies that referenced
 accounts survive while unused fixtures are removed.
 
-### 4.2. Load Testing & Capacity Estimation
-While the core concurrency invariants are functionally verified under concurrent thread simulations, future work should include running synthetic load simulations (e.g., 5,000+ concurrent requests) to benchmark Redis lock performance and compute production RAM allocation requirements based on anticipated throughput.
+### 4.2. Durable JPA `PROCESSING` Reclaim
+
+The JPA-only adapter commits its reservation before opening the business transaction. A
+process death in between can leave a durable `PROCESSING` row. The schema records
+`expires_at`, but reclaim, cleanup scheduling, and fencing semantics are not implemented.
+This remains a deliberate liveness gap and is documented in [Failure Modes](FAILURE_MODES.md)
+and ADR-001 rather than hidden behind a production-readiness claim.
+
+### 4.3. Load Testing & Capacity Estimation
+
+While the core concurrency invariants are functionally verified under concurrent execution,
+future work should derive a workload from explicit traffic and latency assumptions, then
+measure Redis reservation throughput, PostgreSQL lock contention, connection-pool pressure,
+and memory cost before publishing capacity claims.

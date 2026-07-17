@@ -26,7 +26,8 @@
 
 ## Implementation
 
-- [x] Module is wired into the Maven reactor.
+- [x] Standalone Maven build and wrapper are present.
+- [x] Java 21 source and test code compile without deprecated project API usage.
 - [x] Spring Boot application starts.
 - [x] HTTP API exists.
 - [x] Service-level tests cover core behavior.
@@ -51,6 +52,7 @@
 
 - [x] Initial failure modes are documented.
 - [x] Ledger imbalance limitation and next slice are documented.
+- [ ] Durable JPA `PROCESSING` reservations are automatically reclaimed after process death. (Deferred; `expires_at` is stored but cleanup/fencing semantics are not implemented.)
 - [ ] Recovery path is implemented for reconciliation. (Deferred to transaction reconciliation poller slice)
 - [x] Timeout-after-commit scenario is simulated. (Verified via integration tests in RedisPaymentIntakeIntegrationTest)
 

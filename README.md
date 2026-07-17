@@ -1,8 +1,21 @@
 # Idempotent Payment Ledger
 
-Production-style case study for retry-safe payment intake and balanced ledger mutation. It accepts a payment request with an `Idempotency-Key`, persists the first outcome, replays duplicate requests with the same payload, rejects reused keys with different payloads, and records balanced debit/credit ledger entries.
+[![CI](https://github.com/tuanhiep/idempotent-payment-ledger/actions/workflows/ci.yml/badge.svg)](https://github.com/tuanhiep/idempotent-payment-ledger/actions/workflows/ci.yml)
 
-The bar for this module is evidence, not labels: every claim should be implemented in code, covered by tests, or listed as a production gap.
+A production-shaped case study in retry-safe payment intake and balanced ledger mutation. It accepts a payment request with an `Idempotency-Key`, persists the first outcome atomically, replays duplicate requests with the same payload, rejects reused keys with different payloads, and records balanced debit/credit ledger entries. Within the declared failure envelope, retries do not create duplicate payments and the current posting rule commits both ledger sides atomically.
+
+The bar for this module is evidence, not labels: every claim is implemented in code, covered by tests, or explicitly listed as a production gap.
+
+## Why This Is Hard
+
+Most payment idempotency tutorials stop at "store the key, return the cached response." Production systems break in the gaps they skip:
+
+- A server processes a request but crashes before the client receives the response. The client retries. Should the second attempt charge again?
+- Two retries arrive simultaneously before either has received a response. Which one wins, and what does the loser return?
+- Redis marks a payment `ACCEPTED` — but the database transaction rolls back a millisecond later. The cache now lies.
+- Redis TTL expires mid-flight. A replacement request acquires the lease. The original request's cleanup call must not evict the new owner.
+
+Solving these requires more than a cache: it requires reasoning about commit boundaries, ownership tokens, and recovery paths.
 
 ## Problem
 
@@ -15,6 +28,51 @@ Payment APIs live in an unreliable world:
 - ledger entries must remain balanced even under retries.
 
 The system must make payment intake retry-safe while preserving auditability and correctness.
+
+## Architecture
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as API
+    participant R as Redis
+    participant DB as PostgreSQL
+
+    Note over C,DB: Happy path — first request
+    C->>A: POST /api/payments (Idempotency-Key: K)
+    A->>R: SETNX idempotency:K → PROCESSING:<hash>:<owner>
+    R-->>A: acquired
+    A->>DB: INSERT payment + ledger entries (atomic TX)
+    DB-->>A: committed
+    A->>R: afterCommit → SET idempotency:K → ACCEPTED:<response>
+    A-->>C: 200 ACCEPTED
+
+    Note over C,DB: Retry — key already settled
+    C->>A: POST /api/payments (same key, same payload)
+    A->>R: GET idempotency:K
+    R-->>A: ACCEPTED:<response>
+    A-->>C: 200 ACCEPTED (replayed=true)
+
+    Note over C,DB: Cache miss after Redis TTL expiry
+    C->>A: POST /api/payments (same key, same payload)
+    A->>R: SETNX → acquired (TTL had expired)
+    A->>DB: SELECT payment by idempotency_key (Look-and-Replay)
+    DB-->>A: found — payload matches
+    A->>R: SET idempotency:K → ACCEPTED:<response>
+    A-->>C: 200 ACCEPTED (replayed=true)
+```
+
+## Evidence Map
+
+| Artifact | What it proves |
+|---|---|
+| [Engineering Narrative](docs/ENGINEERING_NARRATIVE.md) | The problem, failure kernels, design choices, and interview-ready technical story |
+| [Design Document](docs/DESIGN_DOC.md) | Requirements, consistency model, transaction boundaries, alternatives, and open questions |
+| [Failure Modes](docs/FAILURE_MODES.md) | Expected behavior, executable evidence, and residual failure risk |
+| [ADR-001: Persistence Schema](docs/ADR-001-persistence-schema.md) | PostgreSQL authority, idempotency constraints, and durable processing trade-offs |
+| [ADR-002: Redis Reservation Ownership](docs/ADR-002-redis-reservation-ownership.md) | Owner tokens, lease expiry, and atomic compare-and-set/delete |
+| [Operations Runbook](docs/OPERATIONS_RUNBOOK.md) | Failure diagnosis, owner-safe intervention, reconciliation, and migration rollout |
+| [Gate Checklist](GATE_CHECKLIST.md) | Passed evidence gates and intentionally deferred capabilities |
 
 ## Design Invariants
 
@@ -118,9 +176,13 @@ Run the complete evidence suite from the repository root:
 ./mvnw clean test
 ```
 
+Current closure evidence: 32 tests execute against PostgreSQL 16 and Redis 7 through Testcontainers. GitHub Actions runs the same clean evidence suite on every push to `main`.
+
 ## Production Gaps
 
 - The in-memory adapter remains only for fast unit-level semantics tests; the default runnable profile uses JPA/PostgreSQL.
+- A process crash after a durable JPA `PROCESSING` reservation is committed can leave that key blocked. `expires_at` is stored, but automatic reclaim/cleanup and fencing semantics are deliberately deferred.
+- The current posting rule generates one matched debit/credit pair and commits both atomically. PostgreSQL does not yet enforce a generalized cross-row sum-to-zero constraint for future posting rules.
 - No transactional outbox exists yet.
 - No auth or tenant model exist yet.
 - Observability features domain metrics for accepted, replayed, and rejected requests, but does not yet emit structured tracing spans.

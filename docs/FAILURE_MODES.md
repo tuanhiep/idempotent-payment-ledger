@@ -96,6 +96,32 @@ Current evidence:
 - `PaymentIntakeServiceTest.concurrentDuplicateRequestsCreateOneLedgerTransaction` (In-memory verification)
 - `JpaPaymentIntakeIntegrationTest.java` (Database-level verification under concurrency)
 
+## Durable JPA Processing Reservation After Process Death
+
+Scenario:
+
+The JPA-only profile commits a `PROCESSING` idempotency record in its isolated reservation
+transaction, then the application process dies before the business transaction completes or
+the failure cleanup runs.
+
+Expected production behavior:
+
+An expired reservation must eventually become reclaimable without allowing a stale owner to
+overwrite a newer attempt. Reclaim must first check whether a durable payment already exists,
+then use an ownership or fencing rule before changing the reservation.
+
+Current status:
+
+The schema stores `expires_at`, but the JPA adapter does not yet reclaim expired `PROCESSING`
+records and no cleanup worker is implemented. Repeated requests therefore return `425 Too
+Early` while the stale row remains. This is a liveness gap, not a duplicate-payment safety gap:
+PostgreSQL uniqueness still prevents a second durable payment for the same key.
+
+Closure decision:
+
+Deferred from v1 and exposed publicly. ADR-001 retains the cleanup strategy as an unchecked
+action item; the README and Gate Checklist do not claim this recovery path is implemented.
+
 ## Expired Redis Lease Followed By A Late Owner
 
 Scenario:
